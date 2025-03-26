@@ -24,31 +24,26 @@ option_chain=LLMChain(prompt=prompt, llm=my_llm, verbose=False)
 
 
 
-def get_stage_of_life_score():
+def get_financial_knowledge_score():
     while True:
         try:
-            print("\nWhich of the following best describes your current stage of life? Please select a number between 1 and 6")
-            print("1. Few financial obligations, single or family, wanting to build wealth.")
-            print("2. Many financial obligations, single or family, limited earnings/savings.")
-            print("3. Married with financial commitments, financially stable now but uncertain about the future.")
-            print("4. Mature family. In peak earning years, expenses under control, planning for retirement.")
-            print("5. Close to retirement and major family financial obligations taken care of, seeking a comfortable future.")
-            print("6. Retired, living on savings, investments, or pension.")
+            print("\nHow familiar are you with financial markets and investment products?")
+            print("1. No experience.")
+            print("2. Basic knowledge.")
+            print("3. Understand market fluctuations and sector wise differences in income, growth, and taxes.")
+            print("4. Understand the importance of diversification.")
+            print("5. Experienced.")
             choice = input("    > ")
-            # print(option_chain.run(choice))
             parsed_choice_in_digit = extractIntegerFromLLMResponse(option_chain.run(choice))
             print("Parsed choice by AI: ", parsed_choice_in_digit)
-
-            if not 1 <= parsed_choice_in_digit <= 6:
-                raise ValueError("Invalid input. Please select a number between 1 and 6.")
-            scores = [50, 30, 40, 50, 20, 10]
+            if  not 1 <= parsed_choice_in_digit <= 5:
+                raise ValueError("Invalid input. Please select a number between 1 and 5.")
+            scores = [10, 20, 30, 40, 50]
             return scores[parsed_choice_in_digit - 1]
         except ValueError as e:
             print("\n" + str(e) + "\n")
 
-
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.StageOfLifeQuestion
+# COMMAND :- python -m AIQuestions.FinancialKnowledgeQuestion
 if __name__ == "__main__":
-    get_stage_of_life_score()
-    
+    get_financial_knowledge_score()

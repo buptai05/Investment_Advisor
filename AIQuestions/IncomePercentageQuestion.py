@@ -27,25 +27,23 @@ def get_income_percentage_score():
     while True:
         try:
             print("\nWhat percentage of your annual household income could be available for investment or savings?")
-            print("0%")
-            print("Between 0% and 10%")
-            print("Between 10% and 25%")
-            print("Between 25% and 50%")
-            print("Over 50%")
+            
             choice = input("    > ")
             print(income_percentage_chain.run(choice))
             res = income_percentage_chain.run(choice)
             print("RESPONSE: ", res)
             # parsed_income_percentage = extractIntegerFromLLMResponse(income_percentage_chain.run(choice))
             
-            # print("Parsed income percentage: ", parsed_income_percentage)
+            # None--> ulta seedha jawab, non-contextual reply
             if "None" in res :
                 raise ValueError("Invalid input. Please enter a number between 0 and 100.")
             
-            elif res.isdigit() and not 0 <= extractIntegerFromLLMResponse(res) <= 100:
+            #not none ----> contextual and numeric reply 
+            elif  not 0 <= float(res) <= 100:
                 raise ValueError("Invalid input. Please enter a number between 0 and 100.")
             
-            parsed_income_percentage = extractIntegerFromLLMResponse(res)
+            parsed_income_percentage = float(res)
+            print("Parsed income percentage: ", parsed_income_percentage)
 
             if parsed_income_percentage ==0:
                 return 10
@@ -63,6 +61,12 @@ def get_income_percentage_score():
             attempts += 1
             if attempts > 2:
                 print("Valid input : any number B/W 0 to 100")
+
+# DRIVER FUNCTION FOR TESTING STANDALONE MODULE
+# COMMAND :- python -m AIQuestions.IncomePercentageQuestion
+if __name__ == "__main__":
+    get_income_percentage_score()
+    
 
 
 
