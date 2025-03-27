@@ -8,13 +8,38 @@ import warnings
 # Suppress Hugging Face deprecation warnings
 warnings.simplefilter("ignore", FutureWarning)
 
-income_percentage_template = """
-You are an AI assistant that extracts and returns only the numeric percentage value from the user's reply. Do not include any additional text or explanations in your response. If no percentage value is found, return "None".
+# OLD TEMPLAE
 
-User Reply: {user_reply}
+# income_percentage_template = """
+# You are an AI assistant that extracts and returns only the numeric percentage value from the user's reply. Do not include any additional text or explanations in your response. If no percentage value is found, return "None".
 
-Percentage:
-"""
+# User Reply: {user_reply}
+
+# Percentage:
+# """
+
+income_percentage_template =  """
+    You are a smart data extractor. 
+    The user has been asked: 
+    "What percentage of your annual household income could be available for investment or savings?"
+
+    The user may respond with a percentage value like: 5%, 20.23%, 34%, etc.
+    Your task is to:
+    1. Extract only the numeric percentage value (as a string). Ignore the '%' sign.
+    2. If the user reply is irrelevant, unclear, or non-contextual (does not contain a valid number), return None.
+
+    **Examples:**
+    - User Reply: "About 35%" → Output: 35
+    - User Reply: "Roughly 12.5 percent" → Output: 12.5
+    - User Reply: "I don't know" → Output: None
+    - User Reply: "Maybe stocks and mutual funds" → Output: None
+
+    User Reply:
+    "{user_reply}"
+
+    Output:
+    """
+
 
 prompt = PromptTemplate(template=income_percentage_template, input_variables=['user_reply'])
 
@@ -29,7 +54,7 @@ def get_income_percentage_score():
             print("\nWhat percentage of your annual household income could be available for investment or savings?")
             
             choice = input("    > ")
-            print(income_percentage_chain.run(choice))
+            # print(income_percentage_chain.run(choice))
             res = income_percentage_chain.run(choice)
             print("RESPONSE: ", res)
             # parsed_income_percentage = extractIntegerFromLLMResponse(income_percentage_chain.run(choice))
