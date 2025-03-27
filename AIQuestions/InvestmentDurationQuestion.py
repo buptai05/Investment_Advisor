@@ -30,70 +30,51 @@ age_chain=LLMChain(prompt=prompt, llm=my_llm, verbose=False)
 
 
 
-# OLD FUNCTION
-
-# def get_age_score():
-#     print("What is your age?")
-#     user_response = (input("    > "))
-#     parsedAge = extractIntegerFromLLMResponse(age_chain.run(user_response))
-#     print("Parsed age by AI: ", parsedAge)
-
-#     if parsedAge > 75 or parsedAge < 18:
-#                 return 10
-#     elif 66 <= parsedAge <= 75:
-#                 return 20
-#     elif 55 <= parsedAge <= 65:
-#                 return 30
-#     elif 45 <= parsedAge <= 55:
-#                 return 40
-#     elif 18 <= parsedAge <= 45:
-#                 return 50
-
-
-
 
     
 
-def get_age_score():
-    attempts = 0
+def get_investment_duration_score():
     while True:
         try:
-            print("What is your age?")
-            user_response = input("    > ")
+            print("\nFor how long would you expect most of your money to remain invested before you would need to access it?")
+            duration_input = input("    > ")
 
-            res = age_chain.run(user_response)
+            res = age_chain.run(duration_input)
             print("RES: ", res)
 
             Y, M = parse_numeric_pair(res)
             print(f"years: {Y}, months: {M}")
 
-            age_in_years = Y + M/12.0
+            duration_in_years = Y + M/12.0
 
-            print("Derived age: ", age_in_years)
-            
+            print("Derived duration: ", duration_in_years)
+
+            # match = re.match(r'(\d+(\.\d+)?)\s*(years?|y|months?|m)?', duration_input)
+            # if not match:
+            #     raise ValueError("Please enter a valid duration.")
            
-            if age_in_years < 0 or age_in_years > 120:
-                raise ValueError("Please enter an age between 0 and 120.")
+            # duration_value, duration_unit = match.groups()[0], match.groups()[2]
+            # duration_value = float(duration_value)
+            # if duration_unit in ['months', 'month', 'm']:
+            #     duration_value = duration_value / 12  # Convert months to years
            
-            if age_in_years > 75 or age_in_years < 18:
+            if duration_in_years < 0:
+                raise ValueError("Please enter a positive duration.")
+            if duration_in_years < 1:
                 return 10
-            elif 66 <= age_in_years <= 75:
+            elif 1 <= duration_in_years < 3:
                 return 20
-            elif 55 <= age_in_years <= 65:
+            elif 3 <= duration_in_years < 5:
                 return 30
-            elif 45 <= age_in_years <= 55:
+            elif 5 <= duration_in_years < 10:
                 return 40
-            elif 18 <= age_in_years <= 45:
+            elif duration_in_years >= 10:
                 return 50
         except ValueError as e:
-            print("\n" + str(e) + "\n")
-            attempts += 1
-            # if attempts > 2:
-            #     print("Valid input (example: 30, 100, 50, 85, 41)")
-            
+            print("\n" + str(e) + "\n")            
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.AgeQuestion
+# COMMAND :- python -m AIQuestions.InvestmentDurationQuestion
 if __name__ == "__main__":
-    get_age_score()
+    get_investment_duration_score()
     
