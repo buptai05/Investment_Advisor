@@ -1,5 +1,5 @@
 from MyCustomLLM.CustomLLM import my_llm
-
+from utilities.util import extract_numeric_value
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
@@ -60,7 +60,7 @@ def get_investment_percentage_score():
             if "None" in res :
                 raise ValueError("Invalid input. Please enter a number between 0 and 100.")
             
-            percentage = float(res)
+            percentage = float( extract_numeric_value(res))
 
             if percentage < 0 or percentage > 100:
                 raise ValueError("Please enter a percentage between 0 and 100.")

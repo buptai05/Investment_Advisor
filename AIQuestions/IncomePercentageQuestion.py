@@ -1,5 +1,5 @@
 from MyCustomLLM.CustomLLM import my_llm
-from utilities.util import extractIntegerFromLLMResponse
+from utilities.util import extract_numeric_value
 from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
@@ -64,10 +64,10 @@ def get_income_percentage_score():
                 raise ValueError("Invalid input. Please enter a number between 0 and 100.")
             
             #not none ----> contextual and numeric reply 
-            elif  not 0 <= float(res) <= 100:
+            elif  not 0 <= float( extract_numeric_value(res)) <= 100:
                 raise ValueError("Invalid input. Please enter a number between 0 and 100.")
             
-            parsed_income_percentage = float(res)
+            parsed_income_percentage = float( extract_numeric_value(res))
             print("Parsed income percentage: ", parsed_income_percentage)
 
             if parsed_income_percentage ==0:

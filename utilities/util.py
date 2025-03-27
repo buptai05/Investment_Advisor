@@ -29,3 +29,10 @@ def parse_numeric_pair(input_string):
     
     return None, None  # Return None if no valid pair found
 
+
+# To prevent floating point halucination
+def extract_numeric_value(llm_response):
+    
+    match = re.search(r"\d+\.?\d*", llm_response)
+    return match.group() if match else "None"
+
