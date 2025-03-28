@@ -18,7 +18,7 @@ warnings.simplefilter("ignore", FutureWarning)
 
 age_template = """You are an AI assistant that reads the user input for age and  parses whatever the number(integer/float) is just in front of years and months and returns it as a pair in the format (X,Y) where the input was X year Y month. If no unit is mentioned then assume it is in years.
 If the input is only in years or 'Y' or 'y' or without any unit and the number is in float (for eg. "my age is M.N years" or "my age is M.N" ) then only return as (M.N,0) .If it the input age is only in momths (for eg. Y Months) then return the output in form of (0,Y) . Output only in this format, without any additional text.
-
+For any non -contextual answers or answers which has not any link with age, return only None.
 User: {user_reply}
 
 """
@@ -42,12 +42,7 @@ def get_investment_duration_score():
             res = age_chain.run(duration_input)
             print("RES: ", res)
 
-            Y, M = parse_numeric_pair(res)
-            print(f"years: {Y}, months: {M}")
-
-            duration_in_years = Y + M/12.0
-
-            print("Derived duration: ", duration_in_years)
+            
 
             # match = re.match(r'(\d+(\.\d+)?)\s*(years?|y|months?|m)?', duration_input)
             # if not match:
@@ -57,6 +52,17 @@ def get_investment_duration_score():
             # duration_value = float(duration_value)
             # if duration_unit in ['months', 'month', 'm']:
             #     duration_value = duration_value / 12  # Convert months to years
+
+            if "None" in res :
+                raise ValueError("Invalid input. Please enter a number between 0 and 100.")
+            
+
+            Y, M = parse_numeric_pair(res)
+            print(f"years: {Y}, months: {M}")
+
+            duration_in_years = Y + M/12.0
+
+            print("Derived duration: ", duration_in_years)
            
             if duration_in_years < 0:
                 raise ValueError("Please enter a positive duration.")
