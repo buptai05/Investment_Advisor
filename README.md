@@ -10,3 +10,4 @@
 
 ##Installation of libraries in local
 pip install langchain
+pip install langchain-huggingface
