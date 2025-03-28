@@ -1,4 +1,4 @@
-from AIQuestions import SystemQuestions, AgeQuestion, StageOfLifeQuestion, IncomePercentageQuestion, FinancialKnowledgeQuestion, InvestedAssetPercentageQuestion ,RiskToleranceQuestion, InvestmentDurationQuestion
+from AIQuestions import SystemQuestions, AgeQuestion, StageOfLifeQuestion, IncomePercentageQuestion, FinancialKnowledgeQuestion, InvestedAssetPercentageQuestion ,RiskToleranceQuestion, InvestmentDurationQuestion, UnforeseenEventsDurationQuestion
 
 def calculate_investor_profile(total_score):
     if total_score <= 100:
@@ -23,7 +23,7 @@ def runScript():
     total_score += RiskToleranceQuestion.get_risk_tolerance_score()
     total_score += InvestedAssetPercentageQuestion.get_investment_percentage_score()
     total_score += InvestmentDurationQuestion.get_investment_duration_score()
-    total_score += SystemQuestions.get_unforeseen_events_score()
+    total_score += UnforeseenEventsDurationQuestion.get_unforeseen_events_score()
  
     profile, description = calculate_investor_profile(total_score)
     print(f"\nInvestor Profile: {profile} ({total_score})")
