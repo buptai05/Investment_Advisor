@@ -70,11 +70,11 @@ def get_investment_duration_score():
                 raise ValueError("Please enter a positive duration.")
             if duration_in_years < 1:
                 return 10
-            elif 1 <= duration_in_years < 3:
+            elif 1 <= duration_in_years < 4:
                 return 20
-            elif 3 <= duration_in_years < 5:
+            elif 4 <= duration_in_years < 6:
                 return 30
-            elif 5 <= duration_in_years < 10:
+            elif 6 <= duration_in_years < 10:
                 return 40
             elif duration_in_years >= 10:
                 return 50
