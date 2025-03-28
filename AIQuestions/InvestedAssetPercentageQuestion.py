@@ -7,6 +7,8 @@ import warnings
 
 # Suppress Hugging Face deprecation warnings
 warnings.simplefilter("ignore", FutureWarning)
+warnings.simplefilter("ignore", DeprecationWarning)
+warnings.simplefilter("ignore", UserWarning)
 
 # OLD TEMPLATE
 # invested_percentage_template = """

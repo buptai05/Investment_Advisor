@@ -7,6 +7,8 @@ import warnings
 
 # Suppress Hugging Face deprecation warnings
 warnings.simplefilter("ignore", FutureWarning)
+warnings.simplefilter("ignore", DeprecationWarning)
+warnings.simplefilter("ignore", UserWarning)
 
 selected_user_option_template = """You are an AI assistant that parses and extracts the option number from user given input.
 Output only the option number as an integer, without any additional text.

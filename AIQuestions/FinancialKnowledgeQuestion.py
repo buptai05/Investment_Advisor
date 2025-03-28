@@ -4,6 +4,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
 import warnings
+warnings.simplefilter("ignore", DeprecationWarning)
+warnings.simplefilter("ignore", UserWarning)
 
 # Suppress Hugging Face deprecation warnings
 warnings.simplefilter("ignore", FutureWarning)

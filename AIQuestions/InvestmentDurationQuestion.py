@@ -7,6 +7,8 @@ import warnings
 
 # Suppress Hugging Face deprecation warnings
 warnings.simplefilter("ignore", FutureWarning)
+warnings.simplefilter("ignore", DeprecationWarning)
+warnings.simplefilter("ignore", UserWarning)
 
 # OLD TEMPLATE: WORKS FINE WITH ONLY INTEGER INPUT IN YEARS OR NO UNIT MENTIONED
 # age_template = """You are an AI assistant that extracts the numeric age from user input.
