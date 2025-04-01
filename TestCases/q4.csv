@@ -1,0 +1,13 @@
+﻿Input,Expected output,Suggested Implementation
+1,1,
+2,2,
+3,3,
+4,4,
+5,5,
+6,Error message 'Invalid input. Please select a number between 1 and 5.',
+-1,Error message 'Invalid input. Please select a number between 1 and 5.',
+abc,Error message 'The response does not contain a valid integer.',
+,Error message 'The response does not contain a valid integer.',
+0,Error message 'Invalid input. Please select a number between 1 and 5.',
+Option 3,3,
+I choose 4.,4,
