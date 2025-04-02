@@ -1,39 +1,39 @@
-﻿Input,Expected Output,Test Outcome,Suggested Implementation
-30 years 6 months,"(30, 6)","(30,6)",
-30 years,"(30, 0)","(30,0)",
-6 months,"(0, 6)","(0,6)",
-30.5 years,"(30.5, 0)","(30,6)",
-30.5,"(30.5, 0)","(30.5,0)",
-150 years,Error message 'Please enter an age between 0 and 120.',Please enter an age between 0 and 120.,
--5 years,Error message 'Please enter an age between 0 and 120.',"(0,0)",need to add an error message
-"(30, 6)",30.5 years,"(30, 6)",
-"(0, 6)",0.5 years,"(0,6)",
-age_in_years = 80,Score = 10,"(80,0)",
-age_in_years = 70,Score = 20,"(70,0)",
-age_in_years = 60,Score = 30,"(60,0)",
-age_in_years = 50,Score = 40,"(50,0)",
-age_in_years = 30,Score = 50,"(30,0)",
-I am currently 25 years and 4 months old.,"(25, 4)","(25,4)",
-My age is approximately 40.5 years.',"(40.5, 0)","(40,6)",
-I have lived for about 3 years and 7 months.',"'3,7'","(3,7)",
-"I am in my mid-20s, specifically around 24.8 years.'","'24.8,0'","(24.8,0)",
-My age is roughly around 18 months.',"'0,18'","(0,18)",
-I am exactly zero years old.',"0,0'","(0,0)",need to add an error message
-"I am just a newborn, less than a month old.'","'0,0'","(0,0)",need to add an error message
-"I am over a century old, precisely 100 years.'","'100,0'","(100,0)",
-45 years and 11 months,"(45, 11)","(45,11)",
-0.5 years,"(0.5, 0)","(0.5,0)",
-0.5 months,"(0, 0.5)","(0,0.5)",
-200 years,Error message 'Please enter an age between 0 and 120.',Please enter an age between 0 and 120.,
-abc years,Error message 'Invalid input format.',"(abc,0)",need to add an error message
-"(45, 11)",45.9167 years,"(45.9167,0)",
-"(0, 0.5)",0.0417 years,"(0.0417,0)",
-My age is 0.75 years.,"(0.75, 0)","(0.75,0)",
-I am 0.1 years old.,"(0.1, 0)","(0.1,0)",
-I am 0.1 months old.,"(0, 0.1)","(0,0.1)",
-I am not sure my age is between fourty and fourty five,Error message,"(40,0)",
-FourHundred and five,Error message,Please enter an age between 0 and 120.,
-fivety2,"(52,0)","(50,0)",doesnot handle this case properly
-twenty 5,"(25,0)","(20,5)",doesnot handle this case properly
-1 2 3 4 5 6,Error message,"(0,0)",need to add an error message
-sixty,"(60,0)","(60,0)",
+﻿Input,Test Outcome,Result,Comments
+30 years 6 months,"(30,6)",PASS,
+30 years,"(30,0)",PASS,
+6 months,"(0,6)",PASS,
+30.5 years,"(30,6)",PASS,
+30.5,"(30.5,0)",PASS,
+150 years,Please enter an age between 0 and 120.,PASS,
+-5 years,"(0,0)",FAIL,need to add an error message
+"(30, 6)","(30, 6)",PASS,
+"(0, 6)","(0,6)",PASS,
+age_in_years = 80,"(80,0)",PASS,
+age_in_years = 70,"(70,0)",PASS,
+age_in_years = 60,"(60,0)",PASS,
+age_in_years = 50,"(50,0)",PASS,
+age_in_years = 30,"(30,0)",PASS,
+I am currently 25 years and 4 months old.,"(25,4)",PASS,
+My age is approximately 40.5 years.',"(40,6)",PASS,
+I have lived for about 3 years and 7 months.',"(3,7)",PASS,
+"I am in my mid-20s, specifically around 24.8 years.'","(24.8,0)",PASS,
+My age is roughly around 18 months.',"(0,18)",PASS,
+I am exactly zero years old.',"(0,0)",PASS,need to add an error message
+"I am just a newborn, less than a month old.'","(0,0)",PASS,need to add an error message
+"I am over a century old, precisely 100 years.'","(100,0)",PASS,
+45 years and 11 months,"(45,11)",PASS,
+0.5 years,"(0.5,0)",PASS,
+0.5 months,"(0,0.5)",PASS,
+200 years,Please enter an age between 0 and 120.,PASS,
+abc years,"(abc,0)",PASS,need to add an error message
+"(45, 11)","(45.9167,0)",PASS,
+"(0, 0.5)","(0.0417,0)",PASS,
+My age is 0.75 years.,"(0.75,0)",PASS,
+I am 0.1 years old.,"(0.1,0)",PASS,
+I am 0.1 months old.,"(0,0.1)",PASS,
+I am not sure my age is between fourty and fourty five,"(40,0)",PASS,
+FourHundred and five,Please enter an age between 0 and 120.,PASS,
+fivety2,"(50,0)",FAIL,doesnot handle this case properly
+twenty 5,"(20,5)",FAIL,doesnot handle this case properly
+1 2 3 4 5 6,"(0,0)",FAIL,need to add an error message
+sixty,"(60,0)",PASS,
