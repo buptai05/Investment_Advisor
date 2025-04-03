@@ -1,12 +1,13 @@
-﻿Input,Expected Output,Suggested Implementation
-1,1,
-2,2,
-3,3,
-4,4,
-5,5,
-6,6,
-7,Error message 'Invalid input. Please select a number between 1 and 6.',
--1,Error message 'Invalid input. Please select a number between 1 and 6.',
-abc,Error message 'The response does not contain a valid integer.',
-,Error message 'The response does not contain a valid integer.',
-0,Error message 'Invalid input. Please select a number between 1 and 6.',
+Input	Test Outcome	Result	Comments
+go with first one	1	PASS	
+let me choose opt 2.	2	PASS	
+i select the 3rd option	3	PASS	
+four	4	PASS	
+Option No 5.	5	PASS	
+6	6	PASS	
+7	Error message 'Invalid input. Please select a number between 1 and 6.'	PASS	
+go with ninth	Error message 'Invalid input. Please select a number between 1 and 6.'	PASS	
+go with -5	5	FAIL	
+select option no 2.5	5	FAIL	
+i have two books	2	FAIL	
+opt no zero	Error message 'Invalid input. Please select a number between 1 and 6.'	PASS	
