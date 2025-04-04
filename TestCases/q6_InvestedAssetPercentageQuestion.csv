@@ -1,0 +1,9 @@
+Input,Test Outcome,Result,Comments
+take it as 20.5 percent,20.5,PASS,"	",
+fifteen %,15,PASS,"	",
+150,Error message 'Invalid input. Please enter a number between 0 and 100.',PASS,"	",
+half of my asset,Error message 'Invalid input. Please enter a number between 0 and 100.',FAIL,"	",
+I HAVE TEN BOOKS,Error message 'Invalid input. Please enter a number between 0 and 100.',PASS,
+-5.56%,-556.00%,FAIL,NEED TO ADD ERROR MESSAGE,
+Nothing is available,Error message 'Invalid input. Please enter a number between 0 and 100.',FAIL,"	",
+cent percent,Error message 'Invalid input. Please enter a number between 0 and 100.',FAIL,"	",
