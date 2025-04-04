@@ -95,7 +95,7 @@ def get_age_score():
             
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.AgeQuestion
+# COMMAND :- python -m AIQuestions.1_AgeQuestion
 if __name__ == "__main__":
     get_age_score()
     
