@@ -1,0 +1,8 @@
+Input,Test Outcome,Result,Comments
+take it as 6 years 4 months,"(6,4)",PASS,	
+would like to do for 10 year,None,FAIL,HALUCINATION,
+would like to do for 30 month,None,FAIL,HALUCINATION,
+would like to do for 2 year	None,FAIL,HALUCINATION,
+30 months,"(0,30)",PASS,	
+4.6 years,"(4,6)",FAIL,	
+I have 1 kid whose age is 12 year,"(12,0)",FAIL,
