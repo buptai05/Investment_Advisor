@@ -46,6 +46,6 @@ def get_financial_knowledge_score():
             print("\n" + str(e) + "\n")
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.FinancialKnowledgeQuestion
+# COMMAND :- python -m AIQuestions.4A_FinancialKnowledgeQuestion
 if __name__ == "__main__":
     get_financial_knowledge_score()

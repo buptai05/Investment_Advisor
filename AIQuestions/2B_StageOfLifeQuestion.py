@@ -79,7 +79,7 @@ def get_stage_of_life_score():
         print("ANS : ", ans)   
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m ModifiedMCQwithContext.ModifiedStageOfLifeQuestion
+# COMMAND :- python -m AIQuestions.2B_StageOfLifeQuestion
 if __name__ == "__main__":
     get_stage_of_life_score()
     

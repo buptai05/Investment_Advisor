@@ -53,7 +53,7 @@ def get_risk_tolerance_score():
 
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.RiskToleranceQuestion
+# COMMAND :- python -m AIQuestions.5A_RiskToleranceQuestion
 if __name__ == "__main__":
     get_risk_tolerance_score()
     

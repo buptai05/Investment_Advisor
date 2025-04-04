@@ -50,7 +50,7 @@ def get_stage_of_life_score():
 
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.StageOfLifeQuestion
+# COMMAND :- python -m AIQuestions.2A_StageOfLifeQuestion
 if __name__ == "__main__":
     get_stage_of_life_score()
     

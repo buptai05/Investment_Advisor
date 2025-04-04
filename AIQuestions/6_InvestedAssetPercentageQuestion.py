@@ -83,7 +83,7 @@ def get_investment_percentage_score():
 
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.InvestedAssetPercentageQuestion
+# COMMAND :- python -m AIQuestions.6_InvestedAssetPercentageQuestion
 if __name__ == "__main__":
     get_investment_percentage_score()
     

@@ -90,7 +90,7 @@ def get_income_percentage_score():
                 print("Valid input : any number B/W 0 to 100")
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.IncomePercentageQuestion
+# COMMAND :- python -m AIQuestions.3_IncomePercentageQuestion
 if __name__ == "__main__":
     get_income_percentage_score()
     

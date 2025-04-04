@@ -65,7 +65,7 @@ def get_unforeseen_events_score():
             print("\n" + str(e) + "\n")
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.UnforeseenEventsDurationQuestion
+# COMMAND :- python -m AIQuestions.8_UnforeseenEventsDurationQuestion
 if __name__ == "__main__":
     get_unforeseen_events_score()
     

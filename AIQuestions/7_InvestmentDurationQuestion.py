@@ -82,7 +82,7 @@ def get_investment_duration_score():
             print("\n" + str(e) + "\n")            
 
 # DRIVER FUNCTION FOR TESTING STANDALONE MODULE
-# COMMAND :- python -m AIQuestions.InvestmentDurationQuestion
+# COMMAND :- python -m AIQuestions.7_InvestmentDurationQuestion
 if __name__ == "__main__":
     get_investment_duration_score()
     
