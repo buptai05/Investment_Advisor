@@ -1,0 +1,9 @@
+Input,Test Outcome,Expected Output,Result,Comments
+I generally keep my money only in savings A/C,NONE,10,FAIL,
+"I tell myself I like risks, but my money is in FDs",NONE,20,FAIL,
+I’m scared of the stock market,10,10,PASS,
+I’m chill with risk... until I see red. Then I panic sell,40,30,FAIL,
+Just give me whatever makes money. I don’t care how,50,50,PASS,
+"Short-term loss, long-term gain? Sounds good, but not for me.",20,10,FAIL,
+INVESTING IN STOCKS SEEMS INTERESTING..,NONE,,FAIL,
+"I don’t know where, but I’m okay with whatever",NONE,,FAIL,
