@@ -1,0 +1,9 @@
+Input,Test Outcome,Expected Output,Result,Comments
+I have no idea how stocks or investments work,10,10,PASS,
+"I’ve heard of mutual funds, but that’s about it.",20,20,PASS,
+I understand how different sectors behave and why they perform differently,30,30,PASS,
+"I’ve been investing for 10+ years across equity, bonds, and crypto",50,50,PASS,
+i know more or less basics..,20,20,PASS,
+i HAVE already invested across a lot of funds and shares,50,50,PASS,
+I lOVE BOOKS,NONE,NONE,PASS,
+I read economic news and understand why some sectors perform better during inflation,30,30,PASS,
