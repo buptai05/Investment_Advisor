@@ -2,8 +2,8 @@
 # --- START OF FILE Financial_Familiarity_code.py ---
 
 # %% [Install Dependencies]
-# Assuming necessary dependencies like langchain, langchain_huggingface, python-dotenv are installed
-# !pip install -qU langchain langchain_huggingface python-dotenv pydantic transformers torch accelerate # Added torch/accelerate if needed by model
+# Assuming necessary dependencies like langchain, huggingface, dotenv are installed
+# !pip install -qU langchain langchain_huggingface python-dotenv pydantic transformers huggingface_hub
 
 # %% [Configuration]
 import os
@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.
 @dataclass
 class FinancialFamiliarityConfig:
     """Configuration for the Financial Familiarity scoring system"""
-    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3" # Using the same model as example
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3" # Or choose another suitable model
     max_attempts: int = 3
     # Define the familiarity levels with their descriptions and scores
     familiarity_levels: Dict[int, str] = field(default_factory=lambda: {
@@ -35,14 +35,14 @@ class FinancialFamiliarityConfig:
         20: "Basic knowledge.",
         30: "Understand market fluctuations and sector wise differences in income, growth, and taxes.",
         40: "Understand the importance of diversification.",
-        50: "Experienced."
+        50: "Experienced"
     })
     # Store the scores expected from the LLM for validation
     valid_scores: List[int] = field(init=False) # Will be populated from familiarity_levels keys
 
     llm_params: Dict[str, Any] = field(default_factory=lambda: {
         "temperature": 0.1,
-        "max_new_tokens": 20, # Shorter output needed (just a number or 'none')
+        "max_new_tokens": 20, # Still need short output (score or 'none')
         "top_k": 10,
         "repetition_penalty": 1.2,
     })
@@ -61,46 +61,49 @@ def setup_logging(level=logging.INFO) -> logging.Logger:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     # Reduce noise from underlying libraries
-    logging.getLogger("httpx").setLevel(logging.ERROR)
-    logging.getLogger("httpcore").setLevel(logging.ERROR)
-    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-    logging.getLogger("transformers").setLevel(logging.ERROR)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
     return logging.getLogger("FinancialFamiliarityChatbot")
 
 logger = setup_logging()
 
-# --- API Token Helper (Identical to the Stage of Life example) ---
+# --- API Token Helper (Copied from Reference) ---
 def get_huggingface_token() -> Optional[str]:
     hf_token = os.environ.get("HUGGINGFACE_API_TOKEN")
     if hf_token:
         logger.info("Hugging Face token found in environment variables.")
         return hf_token
     try:
-        # Try Colab specific userdata
+        # Try Colab specific storage first if in Colab environment
         from google.colab import userdata
         hf_token = userdata.get('HUGGINGFACE_API_TOKEN')
         if hf_token:
             logger.info("Hugging Face token found in Colab userdata.")
             return hf_token
+        else:
+             logger.info("Hugging Face token not found in Colab userdata.")
     except (ImportError, ModuleNotFoundError):
         logger.debug("google.colab module not found, skipping userdata check.")
-    except KeyError:
-        logger.info("Hugging Face token not found in Colab userdata.")
-
-    logger.warning("Hugging Face token not found in environment or Colab userdata.")
-    print("Please enter your Hugging Face API token (needed for the LLM):")
-    try:
-        hf_token = getpass("    > ")
-        if hf_token:
-            logger.info("Hugging Face token received via prompt.")
-            print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
-            return hf_token
-        else:
-            logger.error("No Hugging Face token provided via prompt.")
+    # If not found or not in Colab, prompt the user
+    if not hf_token:
+        logger.warning("Hugging Face token not found in environment or Colab userdata.")
+        print("Please enter your Hugging Face API token (needed for the LLM):")
+        try:
+            hf_token = getpass("    > ")
+            if hf_token:
+                logger.info("Hugging Face token received via prompt.")
+                print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
+                return hf_token
+            else:
+                logger.error("No Hugging Face token provided via prompt.")
+                return None
+        except EOFError:
+            logger.error("Could not read Hugging Face token from input (EOF encountered).")
             return None
-    except EOFError:
-         logger.error("Could not read Hugging Face token from input (EOF encountered).")
-         return None
+    return None # Should ideally not be reached if prompt successful
+
 
 # %% [LLM Setup]
 def setup_llm_chain(config: FinancialFamiliarityConfig):
@@ -124,61 +127,72 @@ def setup_llm_chain(config: FinancialFamiliarityConfig):
         logger.exception(f"Failed to initialize HuggingFaceEndpoint for model {config.model_id}: {e}")
         raise ConnectionError(f"Could not connect to Hugging Face Endpoint: {e}") from e
 
-    # --- Build the options part of the prompt dynamically from the config ---
-    familiarity_options_text = "\n".join(
-        [f"  - {score}: {desc}" for score, desc in config.familiarity_levels.items()]
-    )
+    # --- Build the prompt dynamically from the config ---
+    options_text = ""
+    # Create a temporary map from 1-based index to score for prompt generation
+    temp_option_map = {idx + 1: score for idx, score in enumerate(config.familiarity_levels.keys())}
+    for option_num, score in temp_option_map.items():
+         description = config.familiarity_levels[score]
+         options_text += f"  - {score} -> If the user's familiarity matches option {option_num}: \"{description}\"\n"
 
-    # --- Map option numbers (1-5) to scores for prompt examples ---
-    # We derive this mapping to ensure consistency between config and prompt examples
-    # Sort scores to maintain order 1 -> lowest score, 5 -> highest score
-    sorted_scores = sorted(config.familiarity_levels.keys())
-    familiarity_number_to_score = {
-        idx + 1: score for idx, score in enumerate(sorted_scores)
-    }
-    if len(familiarity_number_to_score) != 5:
-        logger.warning(f"Expected 5 familiarity levels but found {len(familiarity_number_to_score)}. Prompt examples might be incorrect.")
-        # Handle potential mismatch gracefully, maybe use defaults or raise error
-        # For now, we proceed, but this indicates a config issue.
-
-    # --- Use the Provided Financial Familiarity Prompt Template ---
-    # This integrates the template you generated earlier.
-    familiarity_template = f"""You are an AI assistant specialized in analyzing user descriptions of their financial market familiarity and matching them to predefined categories.
+    # --- Enhanced Prompt Template for Financial Familiarity ---
+    # This prompt is designed to be robust and handle tricky cases.
+    familiarity_template = f"""You are an AI assistant highly specialized in evaluating a user's self-described familiarity with financial markets and investment products.
 
 **Task:**
-Your goal is to understand the user's input, whether it's a number corresponding to an option OR a free-text description, and determine the single best matching predefined category based on their level of financial knowledge and experience.
+Your primary goal is to carefully analyze the user's input, whether it's a number corresponding to an option OR a free-text description, and determine the SINGLE best matching predefined category based on their level of financial knowledge and experience.
 
-**Predefined Categories and Scores:**
-{familiarity_options_text}
-  - none -> If the response does not fit any of these categories, is irrelevant, or ambiguous.
+**Predefined Familiarity Levels and Scores:**
+{options_text}
+  - none -> If the response does not clearly indicate a level of financial familiarity, is irrelevant, ambiguous, nonsensical, or expresses complete uncertainty about their own level.
 
-**Input Handling:**
-1.  **If the user provides a number (1-5):** Assume they are referring to the options presented (1 maps to score {familiarity_number_to_score.get(1, '??')}, 2 to {familiarity_number_to_score.get(2, '??')}, 3 to {familiarity_number_to_score.get(3, '??')}, 4 to {familiarity_number_to_score.get(4, '??')}, 5 to {familiarity_number_to_score.get(5, '??')}). Identify the corresponding score.
-2.  **If the user provides a description:** Analyze the text to find the category that best reflects their familiarity with financial markets and investment concepts. Focus on stated knowledge, understanding of concepts (like fluctuations, sectors, diversification), or overall experience level.
+**Input Handling Guidance:**
+1.  **If the user provides a number (1-5):** Assume they are directly selecting the corresponding option (1 maps to the first option score, 2 to the second, etc.). Identify the associated score.
+2.  **If the user provides a description:** Analyze the text to find the category that best reflects their stated knowledge or experience. Focus on keywords and phrases related to financial concepts, market understanding, diversification, and practical experience. Be discerning: simply mentioning a term (like 'diversification') doesn't automatically mean they *understand* it at that level unless they state so. Err on the side of a lower score if uncertain between two levels based on a vague description.
 
-**CRITICAL INSTRUCTION:** Respond ONLY with the corresponding numeric score (e.g., {', '.join(map(str, sorted_scores))}) or the word "none". Do NOT include any other text, explanation, punctuation, or formatting.
+**CRITICAL INSTRUCTION:** Respond ONLY with the corresponding numeric score (10, 20, 30, 40, 50) or the word "none". Do NOT include any other text, explanation, punctuation, conversational filler, or formatting. Your entire output must be just the score number or the word 'none'.
 
 **Examples:**
 User Input: "1"
-AI Output: {familiarity_number_to_score.get(1, '??')}
+AI Output: 10
 User Input: "5"
-AI Output: {familiarity_number_to_score.get(5, '??')}
-User Input: "I don't know anything about investing."
-AI Output: {familiarity_number_to_score.get(1, '??')}
-User Input: "I know the basics, like what stocks are."
-AI Output: {familiarity_number_to_score.get(2, '??')}
-User Input: "I follow the market and understand how different industries react to news."
-AI Output: {familiarity_number_to_score.get(3, '??')}
-User Input: "I know it's important not to put all your eggs in one basket."
-AI Output: {familiarity_number_to_score.get(4, '??')}
-User Input: "I've been actively managing my portfolio for years."
-AI Output: {familiarity_number_to_score.get(5, '??')}
-User Input: "I like reading financial news."
-AI Output: {familiarity_number_to_score.get(2, '??')}
-User Input: "Tell me about the weather."
+AI Output: 50
+User Input: "I don't know anything about stocks or bonds."
+AI Output: 10
+User Input: "I'm completely new to investing."
+AI Output: 10
+User Input: "I know what a stock is, but not much more."
+AI Output: 20
+User Input: "I have some basic understanding, read some articles."
+AI Output: 20
+User Input: "I understand that different sectors perform differently and how taxes affect investments."
+AI Output: 30
+User Input: "I follow market trends and know about income vs growth stocks."
+AI Output: 30
+User Input: "I know it's important not to put all eggs in one basket."
+AI Output: 40
+User Input: "I understand diversification helps manage risk."
+AI Output: 40
+User Input: "I actively manage my own portfolio."
+AI Output: 50
+User Input: "I've been investing for years and understand complex products."
+AI Output: 50
+User Input: "I know a little about markets and diversification."  # Ambiguous - leans towards 'basic' and 'diversification', map to higher explicit mention
+AI Output: 40
+User Input: "I know diversification is important, but don't really grasp market fluctuations well." # Mentions higher concept but qualifies understanding as weak on lower concept.
+AI Output: 20 # Maps to the weaker stated understanding.
+User Input: "My advisor handles it all, I don't pay much attention." # User implies *personal* lack of experience/knowledge
+AI Output: 10
+User Input: "I'm interested in learning." # Doesn't state current knowledge level
 AI Output: none
-User Input: "It's complicated."
+User Input: "Finance is important." # Irrelevant to familiarity level
 AI Output: none
+User Input: "Tell me about finance." # A question, not a statement of familiarity
+AI Output: none
+User Input: "Somewhere between basic and understanding sectors." # Ambiguous range
+AI Output: 20 # Default to lower bound if range is given or unclear
+User Input: "3 or maybe 4" # Ambiguous choice
+AI Output: 30 # Default to lower number if multiple options given
 
 User Input: {{user_input}}
 AI Output:"""
@@ -186,12 +200,13 @@ AI Output:"""
     prompt = PromptTemplate(template=familiarity_template, input_variables=["user_input"])
 
     try:
-        ff_chain = LLMChain(prompt=prompt, llm=llm, verbose=False) # Changed variable name
-        logger.info(f"LLM Chain initialized successfully with model {config.model_id} for Financial Familiarity.")
+        ff_chain = LLMChain(prompt=prompt, llm=llm, verbose=False) # Use verbose=True for debugging prompts
+        logger.info(f"LLM Chain initialized successfully with model {config.model_id}.")
         return ff_chain
     except Exception as e:
         logger.exception(f"Failed to create LLMChain: {e}")
         raise RuntimeError(f"Could not create LLMChain: {e}") from e
+
 
 # %% [Main Application Class]
 class FinancialFamiliarityChatbot:
@@ -202,13 +217,9 @@ class FinancialFamiliarityChatbot:
         self.config = config or FinancialFamiliarityConfig()
         self._llm_chain = None
         self._llm_initialized = False
-
         # Create the mapping from option number (1-5) to score
-        # Important: Assumes scores are ordered correctly in the config dict
-        # If order isn't guaranteed, sort keys first: sorted_scores = sorted(self.config.familiarity_levels.keys())
-        sorted_scores = sorted(self.config.familiarity_levels.keys())
         self.option_to_score_map = {
-            idx + 1: score for idx, score in enumerate(sorted_scores)
+            idx + 1: score for idx, score in enumerate(self.config.familiarity_levels.keys())
         }
         # Create reverse map for displaying description
         self.score_to_description_map = self.config.familiarity_levels
@@ -260,10 +271,34 @@ class FinancialFamiliarityChatbot:
                 return score
             else:
                 logger.warning(f"Parsed number {score} is not in the list of valid scores: {self.config.valid_scores}. Output: '{llm_text_output}'")
+                # Check if it might be a misinterpreted option number (e.g., LLM outputs '3' instead of '30') - less likely with good prompt but possible
+                if score in self.option_to_score_map.keys():
+                     derived_score = self.option_to_score_map.get(score)
+                     if derived_score in self.config.valid_scores:
+                         logger.warning(f"LLM output '{score}' looked like an option number, mapping to score: {derived_score}")
+                         return derived_score
                 return None # Treat invalid score number as failure
         except ValueError:
             # Handle cases where the output is not 'none' and not a valid integer
-            logger.error(f"Failed to parse LLM response: '{llm_text_output}'. Expected a valid score number or 'none'.")
+            # Sometimes models might add explanations despite instructions. Try to extract digits.
+            digits = re.findall(r'\d+', cleaned_output)
+            if len(digits) == 1:
+                try:
+                    potential_score = int(digits[0])
+                    if potential_score in self.config.valid_scores:
+                        logger.warning(f"Extracted score '{potential_score}' from non-compliant LLM output: '{llm_text_output}'")
+                        return potential_score
+                    # Check if extracted digit is an option number
+                    elif potential_score in self.option_to_score_map.keys():
+                        derived_score = self.option_to_score_map.get(potential_score)
+                        if derived_score in self.config.valid_scores:
+                           logger.warning(f"Extracted option number '{potential_score}', mapping to score: {derived_score} from non-compliant output: '{llm_text_output}'")
+                           return derived_score
+
+                except ValueError:
+                     pass # Ignore if extracted digits cannot form a valid int
+
+            logger.error(f"Failed to parse LLM response: '{llm_text_output}'. Expected a valid score number ({self.config.valid_scores}) or 'none'.")
             return None # Indicate parsing failure
 
     def process_user_input(self, user_input: str) -> Optional[int]:
@@ -275,8 +310,15 @@ class FinancialFamiliarityChatbot:
             logger.warning("Received empty user input.")
             return None
 
-        # As per the design, we rely on the LLM to handle number inputs based on prompt examples.
-        # No direct mapping of "1"-"5" here.
+        # Optional: Direct handling if user enters *exactly* 1, 2, 3, 4, or 5
+        # try:
+        #     option_num = int(user_input)
+        #     if option_num in self.option_to_score_map:
+        #         score = self.option_to_score_map[option_num]
+        #         logger.info(f"User entered option {option_num}, directly mapped to score: {score}")
+        #         return score
+        # except ValueError:
+        #     pass # Input is not a simple integer, proceed with LLM
 
         try:
             llm_chain_instance = self.llm_chain # Trigger initialization if needed
@@ -299,7 +341,7 @@ class FinancialFamiliarityChatbot:
             logger.info(f"Received LLM response: '{llm_text_output}'")
 
             # Parse the LLM response to get the score or None
-            parsed_score = self.parse_llm_familiarity_response(llm_text_output) # Use updated parser name
+            parsed_score = self.parse_llm_familiarity_response(llm_text_output)
 
             if parsed_score is not None:
                 logger.info(f"Successfully processed input via LLM. Derived score: {parsed_score}.")
@@ -317,6 +359,7 @@ class FinancialFamiliarityChatbot:
         except Exception as e:
             # Catch unexpected errors
             logger.exception(f"An unexpected error occurred during LLM interaction or processing: {e}")
+            print(f"\n[Error] An unexpected analysis error occurred: {type(e).__name__}")
             return None # Indicate failure
 
     def run_interaction(self):
@@ -324,12 +367,17 @@ class FinancialFamiliarityChatbot:
         print("\n" + "="*45)
         print(" Financial Familiarity Assessment")
         print("="*45)
-        print("\nLet's determine the score for your financial knowledge.")
 
-        # Display options clearly
+        # Initialize LLM early to catch connection issues upfront
+        try:
+            self._initialize_llm_chain()
+        except (ValueError, ConnectionError, RuntimeError, Exception) as init_error:
+            print(f"\n[Error] Sorry, I couldn't connect to the system needed for analysis: {init_error}")
+            print("Please check your setup (API token, network) and try again later.")
+            return None # Cannot proceed
+
         print("\nHow familiar are you with financial markets and investment products?")
-        print("You can enter the corresponding number (1-{}) or describe your familiarity:".format(len(self.config.familiarity_levels)))
-        # Use the option_to_score_map for correct numbering (1-5)
+        print("You can enter the corresponding number (1-{}) or describe your familiarity level:".format(len(self.config.familiarity_levels)))
         for option_num, score in self.option_to_score_map.items():
             description = self.score_to_description_map.get(score, "Unknown description")
             print(f"{option_num}. {description} (Score: {score})") # Show score for clarity
@@ -337,22 +385,14 @@ class FinancialFamiliarityChatbot:
         attempts = 0
         final_score = None
 
-        try:
-            # Initialize LLM early to catch connection issues upfront
-            self._initialize_llm_chain()
-        except (ValueError, ConnectionError, RuntimeError, Exception) as init_error:
-            print(f"\n[Error] Sorry, I couldn't connect to the system needed for analysis: {init_error}")
-            print("Please check your setup (API token, network) and try again later.")
-            return None # Cannot proceed
-
         while attempts < self.config.max_attempts:
             current_attempt = attempts + 1
             try:
-                # Adjust prompt based on attempt number
+                # Adjust prompt message based on attempt number
                 if attempts == 0:
                     prompt_message = "Please enter the option number (1-{}) or describe your familiarity:".format(len(self.config.familiarity_levels))
                 else:
-                    prompt_message = "Let's try again. Please enter the option number or describe your situation:"
+                    prompt_message = "Let's try again. Please enter the option number or describe your familiarity level:"
 
                 print(f"\n[{current_attempt}/{self.config.max_attempts}] {prompt_message}")
                 user_input = input("    > ").strip()
@@ -367,18 +407,19 @@ class FinancialFamiliarityChatbot:
                 if score_result is not None:
                     # Successfully got a score from the LLM
                     selected_description = self.score_to_description_map.get(score_result, "Unknown category")
-                    print(f"\nUnderstood! Based on your input, the closest match is:")
+                    print(f"\nUnderstood! Based on your input, your familiarity level is assessed as:")
                     print(f"  '{selected_description}'")
-                    print(f"The score for this familiarity level is: {score_result}")
+                    print(f"The score for this level is: {score_result}")
                     final_score = score_result
                     break # Success! Exit the loop.
                 else:
                     # process_user_input returned None (LLM returned 'none', parsing failed, or error occurred)
-                    print("\nHmm, I wasn't able to determine a matching familiarity level from that.")
-                    # Add a generic message if not already printed by error handler
-                    if "problem communicating" not in locals().get("llm_error", ""):
-                        print("Could you try rephrasing or selecting the option number?")
-                    attempts += 1 # Increment attempts only on failure to determine score
+                    # Check if a specific communication error was already printed
+                    # Need a way to check if the error originated from process_user_input's communication block
+                    # For now, print a generic message if no score resulted
+                     print("\nHmm, I wasn't able to determine a clear familiarity level from that.")
+                     print("Could you try rephrasing or selecting the option number (1-{})?".format(len(self.config.familiarity_levels)))
+                     attempts += 1 # Increment attempts only on failure to determine score
 
             except KeyboardInterrupt:
                 print("\n\nOkay, cancelling this assessment.")
@@ -392,7 +433,7 @@ class FinancialFamiliarityChatbot:
                  print(f"\nAn unexpected issue occurred ({type(e).__name__}). Let's try that again.")
                  attempts += 1 # Count as an attempt
 
-        # After the loop finishes
+        # After the loop finishes (either by success or max attempts)
         if final_score is None and attempts >= self.config.max_attempts:
              print("\nSorry, I couldn't determine the familiarity score after a few tries.")
              print("We may need to skip this question.")
@@ -413,9 +454,9 @@ if __name__ == "__main__":
 
         # Print final outcome
         if final_result is not None:
-            print(f"\n--- Assessment Complete. Final Score: {final_result} ---")
+            print(f"\n--- Assessment Complete. Final Familiarity Score: {final_result} ---")
         else:
-            print("\n--- Assessment ended without determining a final score. ---")
+            print("\n--- Assessment ended without determining a final familiarity score. ---")
 
     except Exception as main_error:
          # Catch critical errors during setup or execution not caught elsewhere
@@ -424,5 +465,4 @@ if __name__ == "__main__":
 
     finally:
         print("\nExiting Financial Familiarity Assessment.")
-
 # --- END OF FILE Financial_Familiarity_code.py ---
