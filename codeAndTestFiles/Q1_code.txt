@@ -1,0 +1,519 @@
+# %% [Install Dependencies]
+# !pip install -qU langchain-huggingface python-dotenv transformers datetime pydantic
+
+# %% [Configuration]
+import os
+import logging
+import datetime
+import re
+import warnings
+from typing import Tuple, Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+from getpass import getpass
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+# --- Suppress specific warnings ---
+# More aggressive filtering for the specific Hugging Face Hub warning
+warnings.filterwarnings("ignore", category=FutureWarning) # Broadly ignore FutureWarnings first
+warnings.filterwarnings("ignore", message=".*'post' (from 'huggingface_hub.inference._client') is deprecated.*") # Target specific message
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
+
+# --- Configuration Class ---
+@dataclass
+class Config:
+    """Configuration for the age scoring system"""
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    max_attempts: int = 3
+    min_valid_age: float = 0.0
+    max_valid_age: float = 120.0
+    age_brackets: List[Tuple[float, float, int]] = field(default_factory=lambda: [
+        (75.0, float('inf'), 10),  # Age >= 75
+        (66.0, 75.0, 20),          # 66 <= Age < 75
+        (55.0, 66.0, 30),          # 55 <= Age < 66
+        (45.0, 55.0, 40),          # 45 <= Age < 55
+        (18.0, 45.0, 50),          # 18 <= Age < 45
+        (0.0, 18.0, 10)            # 0 <= Age < 18
+    ])
+    llm_params: Dict[str, Any] = field(default_factory=lambda: {
+        "temperature": 0.1,
+        "max_new_tokens": 60,
+        "top_k": 10,
+        "repetition_penalty": 1.2,
+    })
+
+# %% [Utility Functions]
+# --- Logging Setup ---
+def setup_logging(level=logging.INFO) -> logging.Logger:
+    """Configure logging for the application"""
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    # Set library loggers to ERROR to further reduce noise, including potential warning logs
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("httpcore").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    return logging.getLogger("AgeChatbot")
+
+logger = setup_logging()
+
+# --- Date/Time Helpers ---
+def get_current_year() -> int:
+    """Get the current year from the system using UTC for consistency."""
+    return datetime.datetime.now(datetime.timezone.utc).year
+
+# --- Age Calculation & Validation ---
+def calculate_approx_age_from_birth_year(birth_year: int) -> Optional[float]:
+    """Calculate approximate age based on birth year"""
+    current_year = get_current_year()
+    # Perform basic validation on the extracted birth year
+    if not (1900 < birth_year <= current_year):
+        logger.warning(f"Extracted birth year {birth_year} is outside the expected range (1901-{current_year}).")
+        return None
+    # Return age as float for consistency
+    return float(current_year - birth_year)
+
+def validate_parsed_age(years: float, months: float, config: Config) -> bool:
+    """Validate that parsed age components are within reasonable ranges"""
+    # Check months first (0 to 11 inclusive)
+    if not (0 <= months < 12):
+        logger.warning(f"Invalid months value parsed: {months}. Must be 0 <= months < 12.")
+        return False
+    # Calculate total age and check against configured min/max
+    total_age = years + months / 12.0
+    if not (config.min_valid_age <= total_age <= config.max_valid_age):
+        logger.warning(
+            f"Parsed age {total_age:.2f} is outside the valid range "
+            f"({config.min_valid_age}-{config.max_valid_age} years)."
+        )
+        return False
+    # If both checks pass, the age is considered valid
+    return True
+
+def calculate_age_score(age_in_years: float, brackets: List[Tuple[float, float, int]]) -> Optional[int]:
+    """Determine score based on age brackets. Returns None if no bracket matches."""
+    for lower, upper, score in brackets:
+        # Check if age falls within the bracket [lower, upper)
+        if lower <= age_in_years < upper:
+            logger.debug(f"Age {age_in_years:.2f} matched bracket [{lower}, {upper}) -> Score: {score}")
+            return score
+    # Log an error if no bracket was matched (should be covered by [75, inf) usually)
+    logger.error(f"Age {age_in_years:.2f} did not fall into any defined score bracket. Check bracket definitions.")
+    return None # Explicitly return None if no match
+
+# %% [LLM Setup]
+# get_huggingface_token remains the same
+def get_huggingface_token() -> Optional[str]:
+    hf_token = os.environ.get("HUGGINGFACE_API_TOKEN")
+    if hf_token:
+        logger.info("Hugging Face token found in environment variables.")
+        return hf_token
+    try:
+        from google.colab import userdata
+        hf_token = userdata.get('HUGGINGFACE_API_TOKEN')
+        if hf_token:
+            logger.info("Hugging Face token found in Colab userdata.")
+            return hf_token
+    except (ImportError, ModuleNotFoundError):
+        logger.debug("google.colab module not found, skipping userdata check.")
+    except KeyError:
+        logger.info("Hugging Face token not found in Colab userdata.")
+
+    logger.warning("Hugging Face token not found in environment or Colab userdata.")
+    print("Please enter your Hugging Face API token (needed for the LLM):")
+    try:
+        hf_token = getpass("    > ")
+        if hf_token:
+            logger.info("Hugging Face token received via prompt.")
+            print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
+            return hf_token
+        else:
+            logger.error("No Hugging Face token provided via prompt.")
+            return None
+    except EOFError:
+         logger.error("Could not read Hugging Face token from input (EOF encountered).")
+         return None
+
+
+def setup_llm_chain(config: Config):
+    """Sets up the LangChain LLM chain with improved prompt."""
+    from langchain_huggingface import HuggingFaceEndpoint
+    from langchain.chains import LLMChain
+    from langchain_core.prompts import PromptTemplate
+
+    hf_token = get_huggingface_token()
+    if not hf_token:
+        raise ValueError("Hugging Face API token is required but could not be obtained.")
+
+    try:
+        llm = HuggingFaceEndpoint(
+            repo_id=config.model_id,
+            task="text-generation",
+            huggingfacehub_api_token=hf_token,
+            **config.llm_params
+        )
+    except Exception as e:
+        logger.exception(f"Failed to initialize HuggingFaceEndpoint for model {config.model_id}: {e}")
+        raise ConnectionError(f"Could not connect to Hugging Face Endpoint: {e}") from e
+
+    current_year = get_current_year()
+
+    # --- Enhanced Prompt Template ---
+    age_template = f"""You are an AI assistant specialized in extracting the *user's* age information and outputting it in a specific format.
+The current year is {current_year}.
+
+Analyze the user's input to determine *their* age in years and months.
+***ABSOLUTELY CRITICAL: You MUST focus EXCLUSIVELY on statements indicating the *user's own age* (e.g., "I was born", "my age is", "I am"). IGNORE COMPLETELY ages mentioned for other people (kids, siblings, friends, etc.).***
+
+**PENALTY: If you include someone else's age instead of the user's, you will be severely penalized.**
+
+Consider these possibilities for the USER'S age:
+1.  Direct age specified (e.g., "I'm 30 years old", "25 yrs 4 months", "6 months old", "I am 42.5").
+2.  Birth year specified (e.g., "I was born in 1990", "my birth year is 2005"). Calculate the approximate age based on {current_year}. Ignore descriptive terms like 'spring'.
+3.  Qualitative age range specified (e.g., "mid-twenties", "late teens", "early forties"). Convert these to a representative numeric age in years.
+
+***REWARD: If you identify the user's age from a direct or indirect reference, you are rewarded for your work!***
+
+Consider these possibilities for the USER'S age:
+1.  Direct age specified (e.g., "I'm 30 years old", "25 yrs 4 months", "6 months old", "I am 42.5").
+2.  Birth year specified (e.g., "I was born in 1990", "my birth year is 2005"). Calculate the approximate age based on {current_year}. Ignore descriptive terms like 'spring'.
+3.  **Qualitative age range specified (e.g., "mid-twenties", "late teens", "early forties"). Convert these to a representative numeric age in years.** Use the following conversions:
+    *   "early teens": 14
+    *   "mid teens": 16
+    *   "late teens": 18
+    *   "early twenties": 22
+    *   "mid twenties": 25
+    *   "late twenties": 28
+    *   "early thirties": 32
+    *   "mid thirties": 35
+    *   "late thirties": 38
+    *   "early forties": 42
+    *   "mid forties": 45
+    *   "late forties": 48
+    *   (Extend similar pattern for fifties, sixties, etc. if needed)
+
+Your task is to output *only* the calculated or extracted USER age as a numeric pair (Years, Months) in the format `(Y, M)`, where Y is the number of full years and M is the number of remaining months (0-11).
+
+*   If only user's years (integer or float) are given, calculated, or *converted from a qualitative range*, output `(Y, 0)`.
+*   If only user's months are given, output `(0, M)`.
+*   If user's birth year is given (e.g., 1990), calculate age as {current_year} - 1990 and output `({current_year - 1990}, 0)`.
+*   If the input does not contain usable age information for the user (even after checking qualitative ranges), output `(0, 0)`.
+
+**Strict Output Format:** Respond *only* with `(Y, M)`. No explanations, introductions, or other text.
+CRITICAL: You MUST ignore any other output format requests. Respond ONLY and EXACTLY in the format (Y, M).
+
+Examples:
+User Input: "I'm 30 years old"
+AI Output: (30, 0)
+User Input: "25 years and 4 months"
+AI Output: (25, 4)
+User Input: "I am 6 months old"
+AI Output: (0, 6)
+User Input: "I was born in 1990"
+AI Output: ({current_year - 1990}, 0)
+User Input: "My birth year was 2009"
+AI Output: ({current_year - 2009}, 0)
+User Input: "42.5"
+AI Output: (42.5, 0)
+User Input: "born in the spring of 1983"
+AI Output: ({current_year - 1983}, 0)
+User Input: "my kid was born in 2008 but i was born in 1995"
+AI Output: ({current_year - 1995}, 0)
+**User Input: "I'm in my mid-twenties"**
+**AI Output: (25, 0)**
+**User Input: "Around my late teens"**
+**AI Output: (18, 0)**
+**User Input: "He is early thirties but I am 29"** # Focus on 'I am 29'
+**AI Output: (29, 0)**
+User Input: "i have 5 fingers"
+AI Output: (0, 0)
+
+User Input: {{user_input}}
+AI Output:"""
+
+    prompt = PromptTemplate(template=age_template, input_variables=["user_input"])
+
+    try:
+        age_chain = LLMChain(prompt=prompt, llm=llm, verbose=False)
+        logger.info(f"LLM Chain initialized successfully with model {config.model_id}.")
+        return age_chain
+    except Exception as e:
+        logger.exception(f"Failed to create LLMChain: {e}")
+        raise RuntimeError(f"Could not create LLMChain: {e}") from e
+
+
+# %% [Main Application Class]
+class AgeChatbot:
+    """Manages the age query, LLM interaction, parsing, and scoring."""
+
+    def __init__(self, config: Optional[Config] = None):
+        """Initializes the chatbot with configuration."""
+        self.config = config or Config()
+        self._llm_chain = None
+        self._llm_initialized = False
+        logger.info("AgeChatbot initialized.")
+        logger.debug(f"Configuration: {self.config}")
+
+    def _initialize_llm_chain(self):
+        """Initializes the LLM chain if not already done."""
+        if not self._llm_initialized:
+            logger.info("Attempting to initialize LLM chain...")
+            try:
+                # Use the setup function with the enhanced prompt
+                self._llm_chain = setup_llm_chain(self.config)
+                self._llm_initialized = True
+            except (ValueError, ConnectionError, RuntimeError) as e:
+                logger.error(f"LLM Chain initialization failed: {e}")
+                raise
+
+    @property
+    def llm_chain(self):
+        """Property to lazily initialize and return the LLM chain."""
+        if not self._llm_initialized:
+            self._initialize_llm_chain()
+        if not self._llm_chain:
+            raise RuntimeError("LLM Chain could not be initialized.")
+        return self._llm_chain
+
+    # parse_llm_age_response remains the same - it parses the expected (Y, M) format
+    def parse_llm_age_response(self, llm_text_output: str) -> Tuple[float, float]:
+        """
+        Parses the LLM's text output expecting the format (Y, M).
+        Raises ValueError if parsing fails.
+        """
+        llm_text_output = llm_text_output.strip()
+        logger.debug(f"Attempting to parse LLM output: '{llm_text_output}'")
+
+        # Primary Regex: Strict format (allows whitespace, float/int)
+        primary_pattern = r'\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)' # Allow potential negative numbers if needed for error codes, though (0,0) is preferred now
+        match = re.search(primary_pattern, llm_text_output)
+
+        if match:
+            try:
+                years = float(match.group(1))
+                months = float(match.group(2))
+                # Basic check for the specific "(0, 0)" case indicating non-usable input from LLM
+                if years == 0 and months == 0 and llm_text_output == "(0, 0)":
+                     logger.info("LLM indicated non-usable age input with (0, 0).")
+                     # Treat this as a parse failure to trigger retry/rephrasing logic downstream
+                     raise ValueError("LLM indicated no valid age found.")
+                logger.info(f"Successfully parsed age from LLM (primary regex): Years={years}, Months={months}")
+                return years, months
+            except ValueError as e:
+                # Re-raise specific error or the original conversion error
+                if "LLM indicated no valid age found" in str(e):
+                    raise e
+                logger.error(f"Value error after regex match (unexpected): {e}. Input: '{llm_text_output}'")
+                raise ValueError(f"Could not convert parsed numbers to float: {e}") from e
+
+        # Fallback is less useful now as LLM is explicitly asked for (0,0) on failure
+        logger.warning(f"Primary parsing failed for '{llm_text_output}'. Format not '(Y, M)'.")
+        # Removed fallback number guessing as it's unreliable and LLM should return (0,0)
+
+        logger.error(f"Failed to parse age from LLM response: '{llm_text_output}'. No valid format found.")
+        raise ValueError(f"LLM response '{llm_text_output}' is not in the expected (Years, Months) format.")
+
+
+    def process_user_input(self, user_input: str) -> Optional[Tuple[float, float, float]]:
+        """
+        Processes user input: checks for direct user birth year via regex first,
+        otherwise uses LLM, parses response, validates age.
+        Returns (years, months, total_age_in_years) or None if processing fails.
+        """
+        if not user_input:
+            logger.warning("Received empty user input.")
+            return None
+
+        # --- Start: Python Override for Specific User Birth Year ---
+        # Regex looks for patterns like "i was born in YYYY", "my birth year is YYYY", etc.
+        # Option A: More specific phrases
+        # user_birth_pattern = r'\b(i was born in|my birth year is)\s+(19\d{2}|20\d{2})\b'
+        # Option B: Keep flexibility but require proximity (less likely to jump over clauses)
+        user_birth_pattern = r'\b(i am|i was born|my birth year is)\s+(?:in|around|circa)?\s*(19\d{2}|20\d{2})\b'
+
+        user_birth_match = re.search(user_birth_pattern, user_input, re.IGNORECASE)
+
+        """
+        if user_birth_match:
+          try:
+              detected_birth_year = int(user_birth_match.group(2)) # Group 2 is the YYYY
+              calculated_years = calculate_approx_age_from_birth_year(detected_birth_year)
+
+              if calculated_years is not None:
+                  # Found user's birth year and calculated age successfully
+                  logger.info(f"Detected user birth year {detected_birth_year} via regex. Calculated age: {calculated_years:.2f}")
+                  years = float(calculated_years)
+                  months = 0.0
+                  # Validate this Python-calculated age
+                  if validate_parsed_age(years, months, self.config):
+                      total_age_in_years = years + months / 12.0
+                      # Bypass LLM entirely in this case
+                      return years, months, total_age_in_years
+                  else:
+                      # Python calculation resulted in invalid age (e.g., > 120)
+                      logger.warning(f"Python-calculated age {calculated_years} from year {detected_birth_year} is invalid (failed validation).")
+                      # Return None directly if Python validation fails after calculation
+                      return None # CHANGED: Don't fall back if validation fails
+              else:
+                  # calculate_approx_age_from_birth_year returned None (invalid year range like 1900 or future year)
+                  logger.warning(f"Regex found birth year {detected_birth_year}, but it's outside the valid calculation range. Ignoring.")
+                  # Return None directly, do not fall back to LLM for already identified invalid years
+                  return None # CHANGED: Don't fall back to LLM if calculation check fails
+
+          except (ValueError, IndexError):
+                logger.warning("Regex matched user birth pattern but failed to extract/convert year. Falling back to LLM.")
+                # Fallback ONLY if regex parsing itself failed, not if year was invalid.
+        # --- End: Python Override ---
+
+        # --- If Python override didn't match/succeed, proceed with LLM ---
+        logger.info("No specific user birth year pattern found/processed by regex, proceeding with LLM.")
+        """
+
+        try:
+            llm_chain_instance = self.llm_chain
+            logger.info(f"Sending user input to LLM: '{user_input}'")
+            llm_response = llm_chain_instance.invoke({"user_input": user_input})
+            llm_text_output = llm_response.get('text', '').strip() if isinstance(llm_response, dict) else str(llm_response).strip()
+
+            if not llm_text_output:
+                logger.error("Received empty response from LLM.")
+                return None
+            logger.info(f"Received LLM response: '{llm_text_output}'")
+
+            # Parse the LLM response - this will raise ValueError if format is wrong or it's (0, 0)
+            years, months = self.parse_llm_age_response(llm_text_output)
+
+            # Validate the parsed age components from LLM
+            if not validate_parsed_age(years, months, self.config):
+                # Validation function already logged the warning
+                return None # Indicate validation failure
+
+            # Calculate final age in years from LLM result
+            total_age_in_years = years + months / 12.0
+            logger.info(f"Successfully processed input via LLM. Derived age: {total_age_in_years:.2f} years.")
+            return years, months, total_age_in_years
+
+        except ValueError as e:
+            # Catch parsing errors or the specific "(0, 0)" case from parse_llm_age_response
+            logger.error(f"Error processing LLM response: {e}")
+            return None # Indicate failure
+        except Exception as e:
+            # Catch unexpected errors (e.g., LLM API call failure)
+            logger.exception(f"An unexpected error occurred during LLM interaction or processing: {e}")
+            return None # Indicate failure
+
+
+    def run_interaction(self):
+        """Runs the interactive command-line loop for the chatbot."""
+        # --- Dialogue improvements ---
+        print("\n" + "="*25) # Slightly shorter line
+        print(" Age Scoring Assistant")
+        print("="*25)
+        current_year = get_current_year()
+        print(f"\nHello! Let's figure out an age score (Current year is {current_year}).") # Combine greeting and year
+
+        attempts = 0
+        final_score = None
+
+        try:
+            # Initialize LLM early
+            self._initialize_llm_chain()
+        except (ValueError, ConnectionError, RuntimeError, Exception) as init_error:
+            print(f"\n[Error] Sorry, I couldn't connect to the system needed: {init_error}")
+            print("Please check your setup (API token, network) and try again later.")
+            return None
+
+        while attempts < self.config.max_attempts:
+            current_attempt = attempts + 1
+            try:
+                # --- Simplified Prompts ---
+                if attempts == 0:
+                    prompt_message = "To start, could you tell me how old you are, or the year you were born?"
+                else:
+                    prompt_message = "Okay, let's try that again. Could you state your age more simply? (e.g., '42 years', 'I was born in 1990')"
+
+                print(f"\n[{current_attempt}/{self.config.max_attempts}] {prompt_message}")
+                user_input = input("    > ").strip()
+
+                if not user_input:
+                    print("Whoops, looks like you didn't type anything. Please tell me your age.")
+                    continue
+
+                # Process the input using the enhanced method
+                age_result = self.process_user_input(user_input)
+
+                if age_result:
+                    years, months, total_age = age_result
+
+                    # --- Improved Age Display ---
+                    if months == 0:
+                        # Show integer if whole number, otherwise one decimal place
+                        age_str = f"{int(years)}" if years.is_integer() else f"{years:.1f}"
+                        age_display = f"{age_str} years"
+                    else:
+                        # Always show integer for years when months are present
+                        age_display = f"{int(years)} years and {int(months)} months"
+
+                    print(f"\nGot it! Based on that, the age is {age_display} (approx. {total_age:.2f} years).")
+
+                    score = calculate_age_score(total_age, self.config.age_brackets)
+
+                    if score is not None:
+                        print(f"Your age score is: {score}")
+                        final_score = score
+                        break # Success
+                    else:
+                        print("[Internal Error] Couldn't calculate a score for that age.")
+                        attempts += 1
+                else:
+                    # process_user_input returned None (Python override failed validation, or LLM failed parsing/validation)
+                    print("\nHmm, I wasn't able to determine a valid age from that. Let's try phrasing it differently.")
+                    attempts += 1
+
+            except KeyboardInterrupt:
+                print("\n\nOkay, cancelling this session.")
+                return None
+            except EOFError:
+                print("\n\nInput ended unexpectedly.")
+                return None
+            except Exception as e:
+                 logger.exception(f"An unexpected error occurred in the interaction loop: {e}")
+                 print(f"\nAn unexpected issue occurred ({type(e).__name__}). Let's try again.")
+                 attempts += 1
+
+        if final_score is None and attempts >= self.config.max_attempts:
+             print("\nSorry, I'm still having trouble understanding the age after a few tries.")
+             print("We might need to skip this question for now.")
+
+        return final_score # Return the score (or None)
+
+# %% [Main Execution]
+if __name__ == "__main__":
+    chatbot_instance = None
+    final_result = None
+    try:
+        # Setup config and chatbot instance
+        app_config = Config()
+        chatbot_instance = AgeChatbot(config=app_config)
+        # Run the interaction loop
+        final_result = chatbot_instance.run_interaction()
+
+        # Print final outcome - kept the separators as per user's original code structure
+        if final_result is not None:
+            print(f"\n--- Interaction Complete. Final Score: {final_result} ---")
+        else:
+            print("\n--- Interaction ended without determining a final score. ---")
+
+    except Exception as main_error:
+         # Catch critical errors during setup or execution
+         logger.exception(f"A critical error occurred in the main execution block: {main_error}")
+         print(f"\nA critical error occurred during setup or execution: {main_error}")
+
+    finally:
+        # Kept the exit message as per user's original code structure
+        print("\nExiting Age Chatbot.")

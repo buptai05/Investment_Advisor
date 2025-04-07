@@ -1,0 +1,682 @@
+# %% [Test Harness - REORDERED with CSV Export, Timing, Filtering, More Cases]
+# This cell should be run AFTER the cell containing your AgeChatbot class definition
+
+import time
+import traceback
+import csv
+import datetime
+from typing import Optional, List
+
+# Make sure necessary functions/classes are available from the previous cell
+# (AgeChatbot, Config, calculate_age_score, get_current_year, setup_logging)
+
+# If logger wasn't defined globally before, define it now for the test harness
+try:
+    logger
+except NameError:
+    logger = setup_logging(logging.INFO) # Or logging.DEBUG for more detail
+
+def run_test_cases(
+    categories_to_run: Optional[List[str]] = None,
+    ids_to_run: Optional[List[str]] = None,
+    use_regex_override_for_test: Optional[bool] = None,
+    use_keyword_check_for_test: Optional[bool] = None
+    ):
+    """
+    Runs a predefined set of test cases against the AgeChatbot, logically ordered.
+
+    Args:
+        categories_to_run: Optional list of category strings to filter tests.
+        ids_to_run: Optional list of test ID strings to filter tests.
+        use_regex_override_for_test: Override Config setting for this run.
+        use_keyword_check_for_test: Override Config setting for this run.
+    """
+    print("--- Starting Test Cases (Logically Ordered) ---")
+    if categories_to_run:
+        print(f"Filtering by Categories: {categories_to_run}")
+    if ids_to_run:
+        print(f"Filtering by IDs: {ids_to_run}")
+
+    chatbot_instance = None
+    all_results_data = []
+
+    # --- Initialize Config and Chatbot ---
+    try:
+        app_config = Config()
+        # Override config based on test parameters
+        if use_regex_override_for_test is not None:
+             app_config.use_regex_override = use_regex_override_for_test
+             print(f"Test Config Override: use_regex_override = {app_config.use_regex_override}")
+        if use_keyword_check_for_test is not None:
+            app_config.use_other_person_keyword_check = use_keyword_check_for_test
+            print(f"Test Config Override: use_other_person_keyword_check = {app_config.use_other_person_keyword_check}")
+
+        chatbot_instance = AgeChatbot(config=app_config)
+        print("Initializing LLM chain (this may take a moment)...")
+        chatbot_instance._initialize_llm_chain()
+        print("Chatbot initialized successfully.")
+
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: Failed to initialize AgeChatbot: {e}")
+        print("\nCannot proceed with tests.")
+        logger.exception("Chatbot initialization failed during test setup.")
+        return
+
+    current_year = get_current_year()
+
+    # --- Define Test Cases (Logically Ordered & Renumbered) ---
+    test_cases = [
+        # === Category 1: Basic Input Validation ===
+        {
+            'id': 'TC001', 'category': 'Input Validation', 'description': 'Empty String Input',
+            'prompt': f'', 'expected': 'fail'
+        },
+        {
+            'id': 'TC002', 'category': 'Input Validation', 'description': 'Whitespace Input',
+            'prompt': f'   \t \n', 'expected': 'fail'
+        },
+        {
+            'id': 'TC003', 'category': 'Input Validation', 'description': 'Gibberish Input',
+            'prompt': f'asdfkljhqwerpoiuyt', 'expected': 'fail'
+        },
+         {
+            'id': 'TC004', 'category': 'Input Validation', 'description': 'Non-age related statement',
+            'prompt': f'i have 5 fingers', 'expected': 'fail'
+        },
+        {
+            'id': 'TC005', 'category': 'Input Validation', 'description': 'Explicit "I dont know"',
+             'prompt': f'How old am I? I don\'t know.', 'expected': 'fail'
+        },
+        {
+            'id': 'TC006', 'category': 'Input Validation', 'description': 'Affirmative response (no age)',
+             'prompt': f'Yes, that birth year is correct.', 'expected': 'fail'
+        },
+
+        # === Category 2: Core Age Extraction (User Focus) ===
+        # --- Sub-Category: Direct Age Statements ---
+        {
+            'id': 'TC007', 'category': 'Direct Age', 'description': 'Simple Years',
+            'prompt': f'I\'m 30 years old', 'expected': 'score'
+        },
+        {
+            'id': 'TC008', 'category': 'Direct Age', 'description': 'Years and Months',
+            'prompt': f'25 years and 4 months', 'expected': 'score'
+        },
+        {
+            'id': 'TC009', 'category': 'Direct Age', 'description': 'Months Only (Infant)',
+            'prompt': f'I am 6 months old', 'expected': 'score'
+        },
+        {
+            'id': 'TC010', 'category': 'Direct Age', 'description': 'Floating Point Years',
+            'prompt': f'My age is 35.7 years.', 'expected': 'score'
+        },
+        {
+            'id': 'TC011', 'category': 'Direct Age', 'description': 'Floating Point Months',
+            'prompt': f'I\'m about 5 years and 2.5 months.', 'expected': 'score'
+        },
+        {
+            'id': 'TC012', 'category': 'Direct Age', 'description': 'Just a Number (Integer)',
+            'prompt': f'70', 'expected': 'score'
+        },
+        {
+            'id': 'TC013', 'category': 'Direct Age', 'description': 'Just a Number (Float)',
+            'prompt': f'42.5', 'expected': 'score'
+        },
+        {
+            'id': 'TC014', 'category': 'Direct Age', 'description': 'Fractional Age ("half")',
+            'prompt': f'I am 30 and a half years old', 'expected': 'score' # (30.5, 0)
+        },
+        {
+            'id': 'TC015', 'category': 'Direct Age', 'description': 'Units Spelled Differently',
+            'prompt': f'Twenty-one yrs', 'expected': 'score'
+        },
+        {
+            'id': 'TC016', 'category': 'Direct Age', 'description': 'Age Spelled Out',
+             'prompt': 'I am sixty two years old.', 'expected': 'score' # LLM should convert.
+        },
+
+        # --- Sub-Category: Birth Year ---
+        {
+            'id': 'TC017', 'category': 'Birth Year', 'description': 'Clear Statement (Regex/LLM)',
+            'prompt': f'People always guess wrong. Just so you know, my birth year is 1991.', 'expected': 'score'
+        },
+        {
+            'id': 'TC018', 'category': 'Birth Year', 'description': 'Near Miss Phrasing (Regex/LLM)',
+            'prompt': f'The year I was born, in 1985, was a great year for music.', 'expected': 'score'
+        },
+        {
+            'id': 'TC019', 'category': 'Birth Year', 'description': '"I am born" variant (Regex/LLM)',
+            'prompt': f'I am born in 1999.', 'expected': 'score'
+        },
+        {
+            'id': 'TC020', 'category': 'Birth Year', 'description': 'Descriptive Year (LLM)',
+            'prompt': f'born in the spring of 1983', 'expected': 'score' # Prompt ignores 'spring'.
+        },
+        {
+            'id': 'TC021', 'category': 'Birth Year', 'description': 'Sentence Fragment (LLM)',
+            'prompt': f'born 1960', 'expected': 'score'
+        },
+        {
+            'id': 'TC022', 'category': 'Birth Year', 'description': 'Invalid Year (Too Early)',
+            'prompt': f'I feel ancient, sometimes I think I was born in 1900.', 'expected': 'fail'
+        },
+        {
+            'id': 'TC023', 'category': 'Birth Year', 'description': 'Invalid Year (Future)',
+            'prompt': f'Just kidding, my birth year is {current_year + 5}.', 'expected': 'fail'
+        },
+        {
+             'id': 'TC024', 'category': 'Birth Year', 'description': 'Year With Month Name',
+             'prompt': f'I was born in March of 1992.', 'expected': 'score' # Extracts 1992.
+         },
+
+        # --- Sub-Category: Qualitative Ranges ---
+        {
+            'id': 'TC025', 'category': 'Qualitative Range', 'description': 'Vague - Mid',
+            'prompt': f'I\'m in my mid-40s.', 'expected': 'score' # Prompt handles 'mid' -> 45.
+        },
+        {
+            'id': 'TC026', 'category': 'Qualitative Range', 'description': 'Vague - Early',
+             'prompt': f'I am in my early 50s.', 'expected': 'score' # Prompt handles 'early' -> 52.
+         },
+         {
+            'id': 'TC027', 'category': 'Qualitative Range', 'description': 'Vague - Late',
+             'prompt': f'I am late 20s.', 'expected': 'score' # Prompt handles 'late' -> 28.
+         },
+         {
+            'id': 'TC028', 'category': 'Qualitative Range', 'description': 'Vague - Roughly',
+             'prompt': f'I\'m roughly in my late thirties.', 'expected': 'score' # Prompt handles -> 38.
+         },
+         {
+            'id': 'TC029', 'category': 'Qualitative Range', 'description': 'Decade Reference Vague',
+             'prompt': f'I was born in the 80s.', 'expected': 'fail' # Prompt fails vague decades.
+         },
+         {
+            'id': 'TC030', 'category': 'Qualitative Range', 'description': 'Decade Reference Mid-Point',
+             'prompt': f'I was born in the mid-90s.', 'expected': 'maybe_score' # LLM might guess 1995 or fail.
+         },
+
+        # --- Sub-Category: Relative Age ---
+        {
+            'id': 'TC031', 'category': 'Relative Age', 'description': 'Future Age Expression (Month)',
+            'prompt': f'I will turn 40 next month.', 'expected': 'score' # Expects (39, 0).
+        },
+        {
+            'id': 'TC032', 'category': 'Relative Age', 'description': 'Past Age Expression (Week/Month)',
+            'prompt': f'I turned 30 last week.', 'expected': 'score' # Expects (30, 0).
+        },
+         {
+            'id': 'TC033', 'category': 'Relative Age', 'description': 'Future Age Expression (Year)',
+             'prompt': f'I turn 60 next year.', 'expected': 'score' # Expects (59, 0).
+         },
+         {
+            'id': 'TC034', 'category': 'Relative Age', 'description': 'Imprecise Future Expression',
+             'prompt': f'I\'ll be 60 later this year.', 'expected': 'maybe_score' # Might use 59 or fail.
+         },
+         {
+            'id': 'TC035', 'category': 'Relative Age', 'description': 'Complex Relative Time',
+             'prompt': f'I\'ll turn 33 in two weeks, so right now I\'m still 32.', 'expected': 'score' # Prompt prioritizes 32.
+         },
+
+        # --- Sub-Category: Alternative Units ---
+        {
+            'id': 'TC036', 'category': 'Alternative Units', 'description': 'Age in Weeks (Infant)',
+            'prompt': f'I am 6 weeks old.', 'expected': 'score' # Prompt handles -> (0, 1) or (0, 2).
+        },
+        {
+            'id': 'TC037', 'category': 'Alternative Units', 'description': 'Age in Days',
+             'prompt': f'I am 7300 days old.', 'expected': 'maybe_score' # LLM might convert.
+        },
+        {
+            'id': 'TC038', 'category': 'Alternative Units', 'description': 'Age in Weeks for Adult',
+             'prompt': f'I am 1560 weeks old.', 'expected': 'maybe_score' # LLM might convert.
+        },
+        {
+            'id': 'TC039', 'category': 'Alternative Units', 'description': 'Complex Mixed Units',
+             'prompt': f'I am 22 years, 3 months, 2 weeks, and 4 days old.', 'expected': 'score' # LLM should handle -> (22, ~3.5).
+        },
+        {
+            'id': 'TC040', 'category': 'Alternative Units', 'description': 'Age in Score (Years)',
+             'prompt': f'I am two score and ten years old.', 'expected': 'maybe_score' # LLM might understand 'score'.
+        },
+
+        # === Category 3: Date Handling ===
+        {
+            'id': 'TC041', 'category': 'Date Handling', 'description': 'Date Format MM/DD/YYYY',
+            'prompt': f'I was born on 05/10/1988.', 'expected': 'score' # Prompt handles.
+        },
+        {
+            'id': 'TC042', 'category': 'Date Handling', 'description': 'Date Format Month Day, YYYY',
+            'prompt': f'My birthday is Oct 5th, 1988.', 'expected': 'score' # Prompt handles.
+        },
+        {
+            'id': 'TC043', 'category': 'Date Handling', 'description': 'European Date Format (DD/MM/YYYY)',
+             'prompt': f'I was born on 15/04/1982', 'expected': 'score' # Prompt handles.
+        },
+        {
+            'id': 'TC044', 'category': 'Date Handling', 'description': 'European Date Format (DD.MM.YYYY)',
+             'prompt': f'My DOB is 15.04.1982.', 'expected': 'score' # LLM should handle variation.
+        },
+        {
+            'id': 'TC045', 'category': 'Date Handling', 'description': 'ISO Date Format (YYYY-MM-DD)',
+             'prompt': f'DOB: 1975-08-23', 'expected': 'score' # Prompt handles.
+        },
+        {
+            'id': 'TC046', 'category': 'Date Handling', 'description': 'Japanese Era Name w/ Year',
+             'prompt': f'I was born in Heisei 3 (1991).', 'expected': 'score' # Extracts 1991.
+        },
+        {
+             'id': 'TC047', 'category': 'Date Handling', 'description': 'Season with Year',
+             'prompt': f'I was born in the summer of 1985.', 'expected': 'score' # Extracts 1985.
+        },
+
+        # === Category 4: Disambiguation & Robustness ===
+        # --- Sub-Category: Ignoring Others ---
+        {
+            'id': 'TC048', 'category': 'Robustness - Ignore Others', 'description': 'Other person age ONLY (Son)',
+            'prompt': f'My son is 12.', 'expected': 'fail'
+        },
+        {
+             'id': 'TC049', 'category': 'Robustness - Ignore Others', 'description': 'Other Person - Pronoun He',
+             'prompt': f'He is 65.', 'expected': 'fail'
+        },
+         {
+             'id': 'TC050', 'category': 'Robustness - Ignore Others', 'description': 'Other Person - Pronoun She (Birth Year)',
+             'prompt': f'She was born in 1993.', 'expected': 'fail'
+        },
+         {
+             'id': 'TC051', 'category': 'Robustness - Ignore Others', 'description': 'Other Person - Specific Name',
+             'prompt': f'My friend Bob is 22.', 'expected': 'fail'
+        },
+        {
+            'id': 'TC052', 'category': 'Robustness - Ignore Others', 'description': 'Focus on User Explicit Birth Year',
+            'prompt': f'my kid was born in 2008 but i was born in 1995', 'expected': 'score'
+        },
+        {
+            'id': 'TC053', 'category': 'Robustness - Ignore Others', 'description': 'Focus on User Explicit Age',
+            'prompt': f'My dad is seventy but I am only forty-two.', 'expected': 'score'
+        },
+        {
+             'id': 'TC054', 'category': 'Robustness - Ignore Others', 'description': 'Age mentioned with Possessive',
+             'prompt': f'My sister\'s age is 15, but mine is 28.', 'expected': 'score' # Extracts 28.
+         },
+         {
+            'id': 'TC055', 'category': 'Robustness - Ignore Others', 'description': 'User age mentioned FIRST then distraction',
+            'prompt': f'I am 52. My cat lived to be 22. That\'s old! My car is 5 years old.', 'expected': 'score'
+        },
+         {
+            'id': 'TC056', 'category': 'Robustness - Ignore Others', 'description': 'User age mentioned LAST after distraction',
+            'prompt': f'My cat lived to be 22. That\'s old! My car is 5 years old. I just remembered I am 52.', 'expected': 'score'
+        },
+
+        # --- Sub-Category: Handling Contradictions / Uncertainty ---
+        {
+            'id': 'TC057', 'category': 'Robustness - Contradiction', 'description': 'Contradictory Statements (Age vs Year)',
+            'prompt': f'I\'m 25. Wait, no, actually I am 26 and a half. My birth certificate says 1998.',
+            'expected': 'score' # Prompt prioritizes birth year 1998.
+        },
+        {
+            'id': 'TC058', 'category': 'Robustness - Contradiction', 'description': 'Combined Age and Year (Consistent)',
+            'prompt': f'I just turned 40 this year, I was born in {current_year - 40}.',
+            'expected': 'score' # Prompt prioritizes birth year.
+        },
+        {
+            'id': 'TC059', 'category': 'Robustness - Contradiction', 'description': 'Combined Age and Year (Inconsistent)',
+            'prompt': f'I just turned 40 this year, I was born in 1980.',
+            'expected': 'score' # Prompt prioritizes birth year -> age from 1980.
+        },
+        {
+            'id': 'TC060', 'category': 'Robustness - Uncertainty', 'description': 'Explicit Uncertainty ("I think")',
+            'prompt': f'I think I was born in 1975, but I am not sure.', 'expected': 'maybe_score' # Might extract 1975 or fail.
+        },
+
+        # --- Sub-Category: Input Variations ---
+         {
+            'id': 'TC061', 'category': 'Robustness - Input Variation', 'description': 'Input with Typo',
+             'prompt': f'I was borm in 1992.', 'expected': 'score'
+        },
+        {
+            'id': 'TC062', 'category': 'Robustness - Input Variation', 'description': 'Input Contains Parentheses',
+             'prompt': f'I am 45 (forty-five) years old.', 'expected': 'score'
+        },
+        {
+             'id': 'TC063', 'category': 'Robustness - Input Variation', 'description': 'Multi-sentence Input',
+             'prompt': f'Hello there. My age is 58 years old. It was a Tuesday.', 'expected': 'score'
+        },
+         {
+            'id': 'TC064', 'category': 'Robustness - Input Variation', 'description': 'Input with Emoji',
+             'prompt': f'I\'m 30 🎉', 'expected': 'score'
+        },
+
+        # --- Sub-Category: Distractions ---
+        {
+            'id': 'TC065', 'category': 'Robustness - Distraction', 'description': 'Very Large Unrelated Number',
+             'prompt': f'My lucky number is 999999999999999, and I was born in 1965.', 'expected': 'score'
+        },
+        {
+            'id': 'TC066', 'category': 'Robustness - Distraction', 'description': 'Address number confusion',
+            'prompt': f'I live at 1990 Main St, but I am 30.', 'expected': 'score' # Should use 30.
+        },
+         {
+            'id': 'TC067', 'category': 'Robustness - Distraction', 'description': 'Phone number confusion',
+             'prompt': f'My number is 555-1982, I turned 40 last year.', 'expected': 'score' # Prompt prioritizes relative age -> 40.
+        },
+         {
+            'id': 'TC068', 'category': 'Robustness - Distraction', 'description': 'Repetitive Numbers',
+             'prompt': f'My group number is 20, section 20, room 20, but I am 35.', 'expected': 'score' # Should extract 35.
+         },
+          {
+            'id': 'TC069', 'category': 'Robustness - Distraction', 'description': 'Ignoring Irrelevant Age in List',
+             'prompt': f'My son just turned 15. My dog is 7. Work anniversary is 20 years. But I am 48 years old.', 'expected': 'score' # = TC007
+        },
+
+        # === Category 5: Validation Logic & Boundaries ===
+        # --- Sub-Category: Age Boundaries ---
+        {
+            'id': 'TC070', 'category': 'Validation - Age Boundary', 'description': 'Max Age Boundary (Inclusive)',
+            'prompt': f'I am exactly 120 years old.', 'expected': 'score'
+        },
+        {
+            'id': 'TC071', 'category': 'Validation - Age Boundary', 'description': 'Just Over Max Age',
+            'prompt': f'I am 120 years and 1 month old.', 'expected': 'fail'
+        },
+        {
+            'id': 'TC072', 'category': 'Validation - Age Boundary', 'description': 'Zero Age Direct Input',
+             'prompt': f'I am 0 years old.', 'expected': 'fail' # Parser treats (0,0) as fail.
+        },
+        {
+            'id': 'TC073', 'category': 'Validation - Age Boundary', 'description': 'Min Valid Age (e.g., 1 month)',
+             'prompt': f'1 month old', 'expected': 'score'
+        },
+        {
+            'id': 'TC074', 'category': 'Validation - Age Boundary', 'description': 'Negative Age Attempt',
+             'prompt': f'I am -5 years old.', 'expected': 'fail'
+        },
+
+        # --- Sub-Category: Month Boundaries ---
+        {
+            'id': 'TC075', 'category': 'Validation - Month Boundary', 'description': 'Invalid Months (Too High)',
+             'prompt': f'I am 10 years and 15 months old.', 'expected': 'fail'
+        },
+        {
+            'id': 'TC076', 'category': 'Validation - Month Boundary', 'description': 'Invalid Months (Negative)',
+             'prompt': f'I am 20 years and -3 months.', 'expected': 'fail'
+        },
+        {
+            'id': 'TC077', 'category': 'Validation - Month Boundary', 'description': 'Valid Month Boundary (0)',
+             'prompt': f'I am 30 years and 0 months.', 'expected': 'score'
+        },
+        {
+            'id': 'TC078', 'category': 'Validation - Month Boundary', 'description': 'Valid Month Boundary (11)',
+             'prompt': f'30 years 11 months', 'expected': 'score'
+        },
+
+        # --- Sub-Category: Score Bracket Boundaries ---
+        {
+            'id': 'TC079', 'category': 'Score Boundary', 'description': 'Age Just Below 18',
+            'prompt': f'I am 17 years and 11 months old.', 'expected': 'score' # Score bracket [0, 18) -> 10
+        },
+        {
+            'id': 'TC080', 'category': 'Score Boundary', 'description': 'Age Exactly 18',
+            'prompt': f'I turned 18 today.', 'expected': 'score' # Score bracket [18, 45) -> 50
+        },
+        {
+            'id': 'TC081', 'category': 'Score Boundary', 'description': 'Age Just Below 45',
+            'prompt': f'My age is 44.9 years.', 'expected': 'score' # Score bracket [18, 45) -> 50
+        },
+        {
+            'id': 'TC082', 'category': 'Score Boundary', 'description': 'Age Exactly 45',
+            'prompt': f'45', 'expected': 'score' # Score bracket [45, 55) -> 40
+        },
+        {
+             'id': 'TC083', 'category': 'Score Boundary', 'description': 'Age Just Below 75',
+             'prompt': f'74 years, 11 months, 29 days', 'expected': 'score' # Bracket [66, 75) -> 20
+         },
+         {
+            'id': 'TC084', 'category': 'Score Boundary', 'description': 'Age Exactly 75',
+             'prompt': f'Born {current_year - 75}', 'expected': 'score' # Score bracket [75, inf) -> 10
+        },
+
+        # === Category 6: Parsing & Format Adherence ===
+        {
+            'id': 'TC085', 'category': 'Parsing & Format', 'description': 'LLM Correct Output Check (Spaces)',
+            'prompt': 'I am exactly 60 years and 1 month old.', 'expected': 'score'
+        },
+        {
+            'id': 'TC086', 'category': 'Parsing & Format', 'description': 'LLM Correct Output Check (No Spaces)',
+            'prompt': 'I am 55.', 'expected': 'score' # Expect (55,0)
+        },
+        {
+            'id': 'TC087', 'category': 'Parsing & Format', 'description': 'LLM Potential Extra Text Before',
+             'prompt': 'Ok, I think I am about 40.', 'expected': 'score' # Expect LLM adheres to format.
+        },
+        {
+            'id': 'TC088', 'category': 'Parsing & Format', 'description': 'LLM Potential Extra Text After',
+             'prompt': 'My age? 29.', 'expected': 'score' # Expect LLM adheres to format.
+        },
+        {
+            'id': 'TC089', 'category': 'Parsing & Format', 'description': 'Requesting Different Format (Breaking)',
+             'prompt': f'I am 33 years old. Please respond with only the number 33.',
+             'expected': 'score' # Expect LLM to ignore request; if not, parser fails (safe).
+        },
+        {
+            'id': 'TC090', 'category': 'Parsing & Format', 'description': 'Input Looks Like Output Format (Breaking)',
+             'prompt': f'My age isn\'t (50, 0), it\'s actually (49, 11).',
+             'expected': 'score' # Expect LLM to parse statement -> (49, 11).
+        },
+        {
+            'id': 'TC091', 'category': 'Parsing & Format', 'description': 'Asking for Explanation (Breaking)',
+             'prompt': f'I am 25. Can you explain how you calculate the score?',
+             'expected': 'score' # Expect LLM *only* outputs (25, 0).
+        },
+
+        # === Category 7: Advanced/Edge Cases ===
+        # --- Sub-Category: Language & Culture ---
+         {
+            'id': 'TC092', 'category': 'Edge Case - Language', 'description': 'Non-English Age Statement',
+            'prompt': f'Tengo 40 años.', 'expected': 'maybe_score'
+        },
+        # --- Sub-Category: Numeric Formatting ---
+        {
+            'id': 'TC093', 'category': 'Edge Case - Number Format', 'description': 'Number with Commas (Months)',
+             'prompt': f'I am 1,000 months old.', 'expected': 'maybe_score' # LLM might handle comma or fail month validation.
+        },
+        {
+            'id': 'TC094', 'category': 'Edge Case - Number Format', 'description': 'Number with Commas (Birth Year)',
+             'prompt': f'I was born in 1,990.', 'expected': 'maybe_score' # LLM might fix comma or fail.
+        },
+        # --- Sub-Category: Inference ---
+         {
+            'id': 'TC095', 'category': 'Edge Case - Inference', 'description': 'Relative to another person',
+            'prompt': f'I am 5 years older than my brother who is 30.', 'expected': 'maybe_score' # LLM might calculate 35 or fail.
+        },
+         {
+            'id': 'TC096', 'category': 'Edge Case - Inference', 'description': 'Age in context of event',
+            'prompt': f'When I graduated college in 2010, I was 22.', 'expected': 'maybe_score' # Might infer birth year 1988.
+        },
+        # --- Sub-Category: Context Simulation (Single Turn Tests) ---
+        {
+            'id': 'TC097', 'category': 'Edge Case - Context Sim', 'description': 'Correction Statement',
+             'prompt': f'Actually, scratch that. I\'m not 50, I\'m 48.', 'expected': 'score' # Parses 48.
+        },
+        {
+            'id': 'TC098', 'category': 'Edge Case - Context Sim', 'description': 'Adding Detail Statement',
+             'prompt': f'And I was born in {current_year - 36}.', 'expected': 'score' # Extracts birth year.
+        },
+        {
+            'id': 'TC099', 'category': 'Edge Case - Context Sim', 'description': 'Vague reference',
+             'prompt': f'As I said before, about 40.', 'expected': 'score' # Extracts 40.
+        },
+        # --- Sub-Category: Performance ---
+        {
+            'id': 'TC100', 'category': 'Performance Edge', 'description': 'Very Long Input with Age at Start',
+            'prompt': f'I\'m 27 years old. ' + 'This is a long story about my life. ' * 20, 'expected': 'score'
+        },
+        {
+            'id': 'TC101', 'category': 'Performance Edge', 'description': 'Very Long Input with Age at End',
+            'prompt': f'This is a long story about my life. ' * 20 + ' Anyway, I\'m 34 years old.', 'expected': 'score'
+        },
+        {
+            'id': 'TC102', 'category': 'Performance Edge', 'description': 'Complex Sentence Structure',
+             'prompt': f'Despite being told I look younger, the year 1979, which was when I arrived, makes me {current_year - 1979}.', 'expected': 'score' # Should prioritize year.
+        },
+        # === FINAL ===
+    ]
+
+
+    # --- Update Test Count for Reporting ---
+    total_tests = len(test_cases)
+    print(f"Total number of test cases defined: {total_tests}")
+
+    # --- Run Tests ---
+    # ... (rest of the run_test_cases function remains the same as previous version) ...
+    # --- Run Tests ---
+    results = {'passed': 0, 'failed': 0, 'maybe': 0, 'total': total_tests}
+    for i, test in enumerate(test_cases):
+        test_id = test.get('id', f'TC{i+1:03d}')
+
+        # --- Filtering Logic ---
+        run_this_test = True
+        if categories_to_run and test['category'] not in categories_to_run:
+            run_this_test = False
+        if ids_to_run and test_id not in ids_to_run:
+            run_this_test = False
+
+        if not run_this_test:
+            # print(f"\n--- Skipping Test Case {i+1}/{total_tests} [{test_id}] ---")
+            continue
+        # --- End Filtering ---
+
+
+        print(f"\n--- Test Case {i+1}/{total_tests} [{test_id} / {test['category']}] ---")
+        print(f"Description: {test['description']}")
+        display_prompt = test['prompt'].format(current_year=current_year)
+        print(f"Input: \"{display_prompt}\"")
+        print(f"Expected Outcome Type: {test['expected']}")
+
+        actual_score = None
+        age_result_tuple = None
+        duration = -1.0
+        age_details = "N/A"
+        outcome_type = 'fail'
+
+        # --- Execute the core logic with Timing ---
+        try:
+            start_time = time.monotonic()
+            age_result_tuple = chatbot_instance.process_user_input(test['prompt'])
+            duration = time.monotonic() - start_time
+
+            if age_result_tuple:
+                years, months, total_age = age_result_tuple
+                age_details = f"Processed: (Years={years:.2f}, Months={months:.2f}, Total={total_age:.2f})"
+                score = calculate_age_score(total_age, chatbot_instance.config.age_brackets)
+                if score is not None:
+                    actual_score = score
+                    outcome_type = 'score'
+                    age_details += f" -> Score: {score}"
+                else:
+                    age_details += " | Scoring Failed (returned None)"
+                    outcome_type = 'fail'
+            else:
+                age_details = "process_user_input returned None (Failure signal)"
+                outcome_type = 'fail'
+
+        except Exception as e:
+            duration = time.monotonic() - start_time if 'start_time' in locals() else -1.0
+            logger.error(f"Exception during test case {i+1} ('{test['description']}'): {e}")
+            print(f"  ERROR: Exception occurred during processing: {e}")
+            outcome_type = 'fail'
+            age_details = f"Exception: {type(e).__name__}: {str(e)[:100]}..."
+        # --- End Core Logic ---
+
+
+        # --- Evaluate Result ---
+        result_status = "FAIL"
+        log_prefix = "🔴"
+
+        if test['expected'] == outcome_type:
+            result_status = "PASS"
+            log_prefix = "✅"
+            results['passed'] += 1
+        elif test['expected'] == 'maybe_score':
+            result_status = f"INFO (Maybe - {outcome_type.capitalize()})"
+            log_prefix = "🤔"
+            results['maybe'] += 1
+        else:
+            results['failed'] += 1
+
+        print(f"  {log_prefix} Result: {result_status}")
+        print(f"      Actual Outcome Type: {outcome_type}")
+        print(f"      Duration: {duration:.4f} sec")
+        print(f"      Age Details: {age_details}")
+        if actual_score is not None:
+             print(f"      Actual Score: {actual_score}")
+
+        # --- Store result for CSV ---
+        result_row = {
+            "RunTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "TestID": test_id,
+            "Category": test['category'],
+            "Description": test['description'],
+            "InputPrompt": test['prompt'],
+            "ExpectedOutcome": test['expected'],
+            "ActualOutcome": outcome_type,
+            "ResultStatus": result_status.split(" ")[0],
+            "DurationSec": f"{duration:.4f}",
+            "ActualAgeTuple": f"({age_result_tuple[0]:.2f}, {age_result_tuple[1]:.2f})" if age_result_tuple else "",
+            "ActualScore": str(actual_score) if actual_score is not None else "",
+            "Notes": age_details
+        }
+        all_results_data.append(result_row)
+
+        # Optional: Add a small delay between API calls if needed
+        # time.sleep(0.1)
+
+    # --- Print Summary ---
+    print("\n" + "="*30)
+    print("--- Test Summary ---")
+    print(f"Total Tests Run: {results['passed'] + results['failed'] + results['maybe']} / {total_tests}")
+    print(f"✅ Passed: {results['passed']}")
+    print(f"🔴 Failed: {results['failed']}")
+    print(f"🤔 Maybe (Info): {results['maybe']}")
+    print("="*30)
+
+    # --- Write results to CSV ---
+    print("\n--- Writing Test Results to CSV ---")
+    results_filename = "test_run_latest.csv"
+    if not all_results_data:
+        print("No results data to write.")
+    else:
+        fieldnames_set = set()
+        for row in all_results_data:
+            fieldnames_set.update(row.keys())
+        preferred_order = ["RunTimestamp", "TestID", "Category", "Description", "InputPrompt",
+                           "ExpectedOutcome", "ActualOutcome", "ResultStatus", "DurationSec",
+                           "ActualAgeTuple", "ActualScore", "Notes"]
+        fieldnames = [f for f in preferred_order if f in fieldnames_set] + \
+                     sorted([f for f in fieldnames_set if f not in preferred_order])
+
+        try:
+            with open(results_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(all_results_data)
+            print(f"Results successfully written to {results_filename}")
+        except Exception as e:
+            print(f"Error writing results to CSV: {e}")
+            logger.error(f"Failed to write results CSV: {e}")
+
+    print("--- Testing Complete ---")
+
+
+# %% [Run Tests]
+# This cell executes the test runner function defined above.
+if __name__ == "__main__":
+   # --- Example Usage of Filtering ---
+   # run_test_cases(categories_to_run=['Validation - Age Boundary', 'Score Boundary'])
+   # run_test_cases(ids_to_run=['TC057', 'TC059'])
+   # run_test_cases(use_regex_override_for_test=False, use_keyword_check_for_test=False) # Test LLM raw
+
+   # Run all tests (default):
+   run_test_cases()
+
+   print("\nExiting test script.")

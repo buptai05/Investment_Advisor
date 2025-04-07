@@ -1,0 +1,430 @@
+# %% [Install Dependencies]
+# Assuming necessary dependencies like langchain, huggingface, dotenv are installed
+# !pip install -qU langchain langchain_huggingface python-dotenv pydantic transformers
+
+# %% [Configuration]
+import os
+import logging
+import warnings
+import re
+from typing import Tuple, Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+from getpass import getpass
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+# --- Suppress specific warnings ---
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*'post' (from 'huggingface_hub.inference._client') is deprecated.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
+
+# --- Configuration Class ---
+@dataclass
+class StageOfLifeConfig:
+    """Configuration for the Stage of Life scoring system"""
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3" # Using the same model as example
+    max_attempts: int = 3
+    # Define the life stages with their descriptions and scores
+    life_stages: Dict[int, str] = field(default_factory=lambda: {
+        50: "Few financial obligations, single or family, wanting to build wealth.",
+        30: "Many financial obligations, single or family, limited earnings/savings.",
+        40: "Married with financial commitments, financially stable now but uncertain about the future.",
+        # Note: There were two options mapping to 50 in the original prompt.
+        # Keeping the first one for now, but this might need clarification.
+        # The second '50' description: "Mature family. In peak earning years, expenses under control, planning for retirement."
+        # Let's add it as a separate score for clarity, or decide which 50 is primary.
+        # For this refactor, let's create a unique score temporarily. Review if 50 should be overloaded.
+        60: "Mature family. In peak earning years, expenses under control, planning for retirement.", # Changed score to 60 for uniqueness
+        20: "Close to retirement and major family financial obligations taken care of, seeking a comfortable future.",
+        10: "Retired, living on savings, investments, or pension."
+    })
+    # Store the scores expected from the LLM for validation
+    valid_scores: List[int] = field(init=False) # Will be populated from life_stages keys
+
+    llm_params: Dict[str, Any] = field(default_factory=lambda: {
+        "temperature": 0.1,
+        "max_new_tokens": 20, # Shorter output needed (just a number or 'none')
+        "top_k": 10,
+        "repetition_penalty": 1.2,
+    })
+
+    def __post_init__(self):
+        # Populate valid_scores after the instance is created
+        self.valid_scores = list(self.life_stages.keys())
+
+# %% [Utility Functions]
+# --- Logging Setup ---
+def setup_logging(level=logging.INFO) -> logging.Logger:
+    """Configure logging for the application"""
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("httpcore").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    return logging.getLogger("StageOfLifeChatbot")
+
+logger = setup_logging()
+
+# --- API Token Helper (Copied from Age Chatbot) ---
+def get_huggingface_token() -> Optional[str]:
+    hf_token = os.environ.get("HUGGINGFACE_API_TOKEN")
+    if hf_token:
+        logger.info("Hugging Face token found in environment variables.")
+        return hf_token
+    try:
+        from google.colab import userdata
+        hf_token = userdata.get('HUGGINGFACE_API_TOKEN')
+        if hf_token:
+            logger.info("Hugging Face token found in Colab userdata.")
+            return hf_token
+    except (ImportError, ModuleNotFoundError):
+        logger.debug("google.colab module not found, skipping userdata check.")
+    except KeyError:
+        logger.info("Hugging Face token not found in Colab userdata.")
+
+    logger.warning("Hugging Face token not found in environment or Colab userdata.")
+    print("Please enter your Hugging Face API token (needed for the LLM):")
+    try:
+        hf_token = getpass("    > ")
+        if hf_token:
+            logger.info("Hugging Face token received via prompt.")
+            print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
+            return hf_token
+        else:
+            logger.error("No Hugging Face token provided via prompt.")
+            return None
+    except EOFError:
+         logger.error("Could not read Hugging Face token from input (EOF encountered).")
+         return None
+
+# %% [LLM Setup]
+def setup_llm_chain(config: StageOfLifeConfig):
+    """Sets up the LangChain LLM chain for stage of life identification."""
+    from langchain_huggingface import HuggingFaceEndpoint
+    from langchain.chains import LLMChain
+    from langchain_core.prompts import PromptTemplate
+
+    hf_token = get_huggingface_token()
+    if not hf_token:
+        raise ValueError("Hugging Face API token is required but could not be obtained.")
+
+    try:
+        llm = HuggingFaceEndpoint(
+            repo_id=config.model_id,
+            task="text-generation",
+            huggingfacehub_api_token=hf_token,
+            **config.llm_params
+        )
+    except Exception as e:
+        logger.exception(f"Failed to initialize HuggingFaceEndpoint for model {config.model_id}: {e}")
+        raise ConnectionError(f"Could not connect to Hugging Face Endpoint: {e}") from e
+
+    # --- Build the prompt dynamically from the config ---
+    options_text = ""
+    for score, description in config.life_stages.items():
+         options_text += f"  - {score} -> If the response matches: \"{description}\"\n"
+
+    # --- Enhanced Prompt Template ---
+    stage_of_life_template = f"""You are an AI assistant specialized in analyzing user descriptions of their life stage and matching them to predefined categories.
+
+**Task:**
+Your goal is to understand the user's input, whether it's a number corresponding to an option OR a free-text description, and determine the single best matching predefined category.
+
+**Predefined Categories and Scores:**
+{options_text}
+  - none -> If the response does not fit any of these categories, is irrelevant, or ambiguous.
+
+**Input Handling:**
+1.  **If the user provides a number (1-6):** Assume they are referring to the options presented (1 maps to the first option, 2 to the second, etc.). Identify the corresponding score.
+2.  **If the user provides a description:** Analyze the text to find the category that best reflects their situation. Focus on the core meaning related to financial obligations, family status, career stage, and retirement planning.
+
+**CRITICAL INSTRUCTION:** Respond ONLY with the corresponding numeric score (e.g., 50, 30, 40, 60, 20, 10) or the word "none". Do NOT include any other text, explanation, punctuation, or formatting.
+
+**Examples:**
+User Input: "1"
+AI Output: 50
+User Input: "6"
+AI Output: 10
+User Input: "I'm young and just started working, no major responsibilities yet."
+AI Output: 50
+User Input: "I have a lot of bills and a family to take care of, but my income is not great."
+AI Output: 30
+User Input: "Married, have a mortgage, doing okay financially but worried about the future."
+AI Output: 40
+User Input: "We are financially stable, kids are growing, and I am focusing on retirement planning."
+AI Output: 60
+User Input: "I'm about to retire, no major expenses left, just want a secure future."
+AI Output: 20
+User Input: "I am at the end of my career / service life"
+AI Output: 20
+User Input: "I'm retired and living off my pension and savings."
+AI Output: 10
+User Input: "I love pizza and traveling."
+AI Output: none
+User Input: "My situation is complex."
+AI Output: none
+
+User Input: {{user_input}}
+AI Output:""" # Removed the extra newline and "Output:" label for stricter adherence
+
+    prompt = PromptTemplate(template=stage_of_life_template, input_variables=["user_input"])
+
+    try:
+        sol_chain = LLMChain(prompt=prompt, llm=llm, verbose=False)
+        logger.info(f"LLM Chain initialized successfully with model {config.model_id}.")
+        return sol_chain
+    except Exception as e:
+        logger.exception(f"Failed to create LLMChain: {e}")
+        raise RuntimeError(f"Could not create LLMChain: {e}") from e
+
+
+# %% [Main Application Class]
+class StageOfLifeChatbot:
+    """Manages the stage of life query, LLM interaction, parsing, and scoring."""
+
+    def __init__(self, config: Optional[StageOfLifeConfig] = None):
+        """Initializes the chatbot with configuration."""
+        self.config = config or StageOfLifeConfig()
+        self._llm_chain = None
+        self._llm_initialized = False
+        # Create the mapping from option number (1-6) to score for potential direct lookup
+        self.option_to_score_map = {
+            idx + 1: score for idx, score in enumerate(self.config.life_stages.keys())
+        }
+        # Create reverse map for displaying description
+        self.score_to_description_map = self.config.life_stages
+
+        logger.info("StageOfLifeChatbot initialized.")
+        logger.debug(f"Configuration: {self.config}")
+        logger.debug(f"Option to Score Map: {self.option_to_score_map}")
+
+
+    def _initialize_llm_chain(self):
+        """Initializes the LLM chain if not already done."""
+        if not self._llm_initialized:
+            logger.info("Attempting to initialize LLM chain...")
+            try:
+                self._llm_chain = setup_llm_chain(self.config)
+                self._llm_initialized = True
+            except (ValueError, ConnectionError, RuntimeError) as e:
+                logger.error(f"LLM Chain initialization failed: {e}")
+                raise # Propagate the error
+
+    @property
+    def llm_chain(self):
+        """Property to lazily initialize and return the LLM chain."""
+        if not self._llm_initialized:
+            self._initialize_llm_chain()
+        if not self._llm_chain:
+            # This should ideally not happen if _initialize_llm_chain raises on failure
+            raise RuntimeError("LLM Chain could not be initialized.")
+        return self._llm_chain
+
+    def parse_llm_stage_response(self, llm_text_output: str) -> Optional[int]:
+        """
+        Parses the LLM's text output expecting a score number or 'none'.
+        Returns the integer score or None if 'none' or parsing fails.
+        """
+        cleaned_output = llm_text_output.strip().lower()
+        logger.debug(f"Attempting to parse LLM output: '{cleaned_output}'")
+
+        if cleaned_output == "none":
+            logger.info("LLM indicated no matching category ('none').")
+            return None
+
+        try:
+            # Attempt to convert the output to an integer
+            score = int(cleaned_output)
+            # Validate if the score is one of the expected ones
+            if score in self.config.valid_scores:
+                logger.info(f"Successfully parsed score from LLM: {score}")
+                return score
+            else:
+                logger.warning(f"Parsed number {score} is not in the list of valid scores: {self.config.valid_scores}. Output: '{llm_text_output}'")
+                return None # Treat invalid score number as failure
+        except ValueError:
+            # Handle cases where the output is not 'none' and not a valid integer
+            logger.error(f"Failed to parse LLM response: '{llm_text_output}'. Expected a valid score number or 'none'.")
+            return None # Indicate parsing failure
+
+    def process_user_input(self, user_input: str) -> Optional[int]:
+        """
+        Processes user input using the LLM, parses the response, and returns the score.
+        Returns the integer score or None if processing fails or LLM returns 'none'.
+        """
+        if not user_input:
+            logger.warning("Received empty user input.")
+            return None
+
+        # --- Direct Number Handling (Optional Enhancement) ---
+        # We *could* add a check here: if user_input is "1"-"6", map directly.
+        # However, the current design lets the LLM handle this via the prompt examples,
+        # which might be more robust to slight variations (e.g., "option 1").
+        # Let's stick to the LLM-based approach for consistency for now.
+        # try:
+        #     option_num = int(user_input)
+        #     if option_num in self.option_to_score_map:
+        #         score = self.option_to_score_map[option_num]
+        #         logger.info(f"User entered option {option_num}, directly mapped to score: {score}")
+        #         return score
+        # except ValueError:
+        #     # Input is not a simple integer, proceed with LLM
+        #     pass
+        # --- End Optional Enhancement ---
+
+
+        try:
+            llm_chain_instance = self.llm_chain # Trigger initialization if needed
+            logger.info(f"Sending user input to LLM: '{user_input}'")
+            llm_response = llm_chain_instance.invoke({"user_input": user_input})
+
+            # Extract text output robustly
+            if isinstance(llm_response, dict):
+                llm_text_output = llm_response.get('text', '')
+            elif isinstance(llm_response, str):
+                llm_text_output = llm_response
+            else:
+                llm_text_output = str(llm_response) # Fallback
+            llm_text_output = llm_text_output.strip()
+
+
+            if not llm_text_output:
+                logger.error("Received empty response from LLM.")
+                return None
+            logger.info(f"Received LLM response: '{llm_text_output}'")
+
+            # Parse the LLM response to get the score or None
+            parsed_score = self.parse_llm_stage_response(llm_text_output)
+
+            if parsed_score is not None:
+                logger.info(f"Successfully processed input via LLM. Derived score: {parsed_score}.")
+                return parsed_score
+            else:
+                # Parsing failed or LLM returned 'none'
+                logger.warning("LLM response did not yield a valid score.")
+                return None # Indicate failure or 'none' case
+
+        except (ValueError, ConnectionError, RuntimeError) as llm_error:
+             # Catch specific errors during LLM init/call
+             logger.error(f"LLM-related error during processing: {llm_error}")
+             # Depending on the error, you might want to inform the user differently
+             # For simplicity, returning None to trigger a retry or failure message.
+             print(f"\n[Error] Sorry, there was a problem communicating with the analysis service: {llm_error}")
+             return None
+        except Exception as e:
+            # Catch unexpected errors
+            logger.exception(f"An unexpected error occurred during LLM interaction or processing: {e}")
+            return None # Indicate failure
+
+    def run_interaction(self):
+        """Runs the interactive command-line loop for the chatbot."""
+        print("\n" + "="*35)
+        print(" Stage of Life Assessment")
+        print("="*35)
+        print("\nLet's determine the score for your current stage of life.")
+
+        # Display options clearly
+        print("\nWhich of the following best describes your situation?")
+        print("You can enter the corresponding number (1-{}) or describe your situation in your own words:".format(len(self.config.life_stages)))
+        for option_num, score in self.option_to_score_map.items():
+            description = self.score_to_description_map.get(score, "Unknown description")
+            print(f"{option_num}. {description} (Score: {score})") # Show score for clarity
+
+        attempts = 0
+        final_score = None
+
+        try:
+            # Initialize LLM early to catch connection issues upfront
+            self._initialize_llm_chain()
+        except (ValueError, ConnectionError, RuntimeError, Exception) as init_error:
+            print(f"\n[Error] Sorry, I couldn't connect to the system needed for analysis: {init_error}")
+            print("Please check your setup (API token, network) and try again later.")
+            return None # Cannot proceed
+
+        while attempts < self.config.max_attempts:
+            current_attempt = attempts + 1
+            try:
+                # Adjust prompt based on attempt number
+                if attempts == 0:
+                    prompt_message = "Please enter the option number (1-{}) or describe your stage of life:".format(len(self.config.life_stages))
+                else:
+                    prompt_message = "Let's try again. Please enter the option number or describe your situation:"
+
+                print(f"\n[{current_attempt}/{self.config.max_attempts}] {prompt_message}")
+                user_input = input("    > ").strip()
+
+                if not user_input:
+                    print("Whoops, looks like you didn't type anything. Please provide an answer.")
+                    continue # Ask again without incrementing attempts
+
+                # Process the input
+                score_result = self.process_user_input(user_input)
+
+                if score_result is not None:
+                    # Successfully got a score from the LLM
+                    selected_description = self.score_to_description_map.get(score_result, "Unknown category")
+                    print(f"\nUnderstood! Based on your input, the closest match is:")
+                    print(f"  '{selected_description}'")
+                    print(f"The score for this stage is: {score_result}")
+                    final_score = score_result
+                    break # Success! Exit the loop.
+                else:
+                    # process_user_input returned None (LLM returned 'none', parsing failed, or error occurred)
+                    print("\nHmm, I wasn't able to determine a matching stage from that.")
+                    # Check if it was an LLM communication error already printed in process_user_input
+                    # Add a generic message if not already printed
+                    # Note: The specific error print happens inside process_user_input for connection errors
+                    if "problem communicating" not in locals().get("llm_error", ""): # Avoid double printing connection errors
+                        print("Could you try rephrasing or selecting the option number?")
+                    attempts += 1 # Increment attempts only on failure to determine score
+
+            except KeyboardInterrupt:
+                print("\n\nOkay, cancelling this assessment.")
+                return None
+            except EOFError:
+                print("\n\nInput ended unexpectedly.")
+                return None
+            # Catch unexpected errors in the loop itself (less likely now with error handling in process_user_input)
+            except Exception as e:
+                 logger.exception(f"An unexpected error occurred in the interaction loop: {e}")
+                 print(f"\nAn unexpected issue occurred ({type(e).__name__}). Let's try that again.")
+                 attempts += 1 # Count as an attempt
+
+        # After the loop finishes (either by success or max attempts)
+        if final_score is None and attempts >= self.config.max_attempts:
+             print("\nSorry, I couldn't determine the stage of life score after a few tries.")
+             print("We may need to skip this question.")
+
+        return final_score # Return the final score (int) or None
+
+# %% [Main Execution]
+if __name__ == "__main__":
+    chatbot_instance = None
+    final_result = None
+    try:
+        # Setup config and chatbot instance
+        app_config = StageOfLifeConfig()
+        chatbot_instance = StageOfLifeChatbot(config=app_config)
+
+        # Run the interaction loop
+        final_result = chatbot_instance.run_interaction()
+
+        # Print final outcome
+        if final_result is not None:
+            print(f"\n--- Assessment Complete. Final Score: {final_result} ---")
+        else:
+            print("\n--- Assessment ended without determining a final score. ---")
+
+    except Exception as main_error:
+         # Catch critical errors during setup or execution not caught elsewhere
+         logger.exception(f"A critical error occurred in the main execution block: {main_error}")
+         print(f"\nA critical error occurred during setup or execution: {main_error}")
+
+    finally:
+        print("\nExiting Stage of Life Assessment.")

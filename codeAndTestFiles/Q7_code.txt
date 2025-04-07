@@ -1,0 +1,473 @@
+# %% [Install Dependencies]
+# !pip install -qU langchain-huggingface python-dotenv transformers datetime pydantic
+
+# %% [Configuration]
+import os
+import logging
+import datetime # Still potentially useful for logging timestamps
+import re
+import warnings
+from typing import Tuple, Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+from getpass import getpass
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+# --- Suppress specific warnings ---
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*'post' (from 'huggingface_hub.inference._client') is deprecated.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
+
+# --- Configuration Class ---
+@dataclass
+class Config:
+    """Configuration for the investment duration scoring system"""
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    max_attempts: int = 3
+    # Renamed brackets for clarity
+    duration_brackets: List[Tuple[float, float, int]] = field(default_factory=lambda: [
+        (10.0, float('inf'), 50), # Duration >= 10 years
+        (6.0, 10.0, 40),         # 6 <= Duration < 10 years
+        (4.0, 6.0, 30),          # 4 <= Duration < 6 years
+        (1.0, 4.0, 20),          # 1 <= Duration < 4 years
+        (0.0, 1.0, 10)           # 0 <= Duration < 1 year (includes months only)
+    ])
+    llm_params: Dict[str, Any] = field(default_factory=lambda: {
+        "temperature": 0.1,
+        "max_new_tokens": 60,
+        "top_k": 10,
+        "repetition_penalty": 1.2,
+    })
+    # Removed min/max_valid_age as they are not directly applicable to duration
+    # A validation function will check for non-negative duration instead.
+
+# %% [Utility Functions]
+# --- Logging Setup ---
+def setup_logging(level=logging.INFO) -> logging.Logger:
+    """Configure logging for the application"""
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("httpcore").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    # Changed logger name for clarity
+    return logging.getLogger("InvestmentDurationChatbot")
+
+logger = setup_logging()
+
+# --- Duration Calculation & Validation ---
+# Removed calculate_approx_age_from_birth_year
+
+def validate_parsed_duration(years: float, months: float) -> bool:
+    """Validate that parsed duration components are reasonable (non-negative)"""
+    if not (0 <= months < 12):
+        logger.warning(f"Invalid months value parsed: {months}. Must be 0 <= months < 12.")
+        return False
+    if years < 0:
+         logger.warning(f"Invalid negative years value parsed: {years}. Must be non-negative.")
+         return False
+
+    # Calculate total duration for logging/checking (optional, main check is on components)
+    total_duration = years + months / 12.0
+    if total_duration < 0: # Should be caught by year check, but redundant check is fine
+        logger.warning(f"Parsed duration {total_duration:.2f} is negative, which is invalid.")
+        return False
+
+    # If checks pass, the duration is considered valid
+    return True
+
+def calculate_duration_score(total_duration_in_years: float, brackets: List[Tuple[float, float, int]]) -> Optional[int]:
+    """Determine score based on duration brackets. Returns None if no bracket matches."""
+    # Ensure non-negative duration for scoring
+    if total_duration_in_years < 0:
+        logger.warning(f"Cannot calculate score for negative duration: {total_duration_in_years:.2f}")
+        return None
+
+    for lower, upper, score in brackets:
+        # Check if duration falls within the bracket [lower, upper)
+        if lower <= total_duration_in_years < upper:
+            logger.debug(f"Duration {total_duration_in_years:.2f} matched bracket [{lower}, {upper}) -> Score: {score}")
+            return score
+    # Log an error if no bracket was matched (should be covered by [10, inf) usually)
+    logger.error(f"Duration {total_duration_in_years:.2f} did not fall into any defined score bracket. Check bracket definitions.")
+    return None # Explicitly return None if no match
+
+# %% [LLM Setup]
+def get_huggingface_token() -> Optional[str]:
+    # This function remains the same as in the original code
+    hf_token = os.environ.get("HUGGINGFACE_API_TOKEN")
+    if hf_token:
+        logger.info("Hugging Face token found in environment variables.")
+        return hf_token
+    try:
+        from google.colab import userdata
+        hf_token = userdata.get('HUGGINGFACE_API_TOKEN')
+        if hf_token:
+            logger.info("Hugging Face token found in Colab userdata.")
+            return hf_token
+    except (ImportError, ModuleNotFoundError):
+        logger.debug("google.colab module not found, skipping userdata check.")
+    except KeyError:
+        logger.info("Hugging Face token not found in Colab userdata.")
+
+    logger.warning("Hugging Face token not found in environment or Colab userdata.")
+    print("Please enter your Hugging Face API token (needed for the LLM):")
+    try:
+        hf_token = getpass("    > ")
+        if hf_token:
+            logger.info("Hugging Face token received via prompt.")
+            print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
+            return hf_token
+        else:
+            logger.error("No Hugging Face token provided via prompt.")
+            return None
+    except EOFError:
+         logger.error("Could not read Hugging Face token from input (EOF encountered).")
+         return None
+
+def setup_llm_chain(config: Config):
+    """Sets up the LangChain LLM chain with the investment duration prompt."""
+    from langchain_huggingface import HuggingFaceEndpoint
+    from langchain.chains import LLMChain
+    from langchain_core.prompts import PromptTemplate
+
+    hf_token = get_huggingface_token()
+    if not hf_token:
+        raise ValueError("Hugging Face API token is required but could not be obtained.")
+
+    try:
+        llm = HuggingFaceEndpoint(
+            repo_id=config.model_id,
+            task="text-generation",
+            huggingfacehub_api_token=hf_token,
+            **config.llm_params
+        )
+    except Exception as e:
+        logger.exception(f"Failed to initialize HuggingFaceEndpoint for model {config.model_id}: {e}")
+        raise ConnectionError(f"Could not connect to Hugging Face Endpoint: {e}") from e
+
+    # --- Investment Duration Prompt Template ---
+    duration_template = f"""You are an AI assistant specialized in extracting the user's expected *investment duration* and outputting it in a specific format.
+
+Analyze the user's response to the question: "For how long would you expect most of your money to remain invested before you would need to access it?"
+
+Your goal is to determine the duration in years and months.
+
+Consider these possibilities for the investment duration:
+1.  Direct duration specified (e.g., "5 years", "18 months", "2.5 years", "6 months").
+2.  Qualitative duration specified (e.g., "short term", "medium term", "long term", "a few years", "several years", "until retirement"). Convert these to a representative numeric duration in years using the conversions below.
+3.  Ranges mentioned (e.g., "between 5 and 10 years"). Try to pick a reasonable single value, perhaps the lower end or average if simple. (e.g., "5-10 years" -> 5 years). Prioritize extracting *any* single plausible number if available.
+
+***IGNORE mentions of specific monetary amounts, investment types, past performance, or reasons for needing the money unless they directly clarify the *duration*. Focus ONLY on the time horizon.***
+
+**Use the following conversions for qualitative terms:**
+*   "short term", "near term": 2 years
+*   "a few years", "couple of years": 3 years
+*   "medium term": 5 years
+*   "several years": 7 years
+*   "long term": 10 years
+*   "very long term", "until retirement", "decades": 20 years (Use 20 as a default estimate for these distant horizons)
+
+Your task is to output *only* the extracted or converted duration as a numeric pair (Years, Months) in the format `(Y, M)`, where Y is the number of full years and M is the number of remaining months (0-11).
+
+*   If only years are given or calculated/converted, output `(Y, 0)`. (e.g., "5 years" -> (5, 0), "long term" -> (10, 0), "3.5 years" -> (3.5, 0))
+*   If only months are given, output `(0, M)`. (e.g., "6 months" -> (0, 6))
+*   If years and months are given (e.g., "2 years and 3 months"), output `(2, 3)`.
+*   If the input does not contain usable duration information (e.g., "I don't know", "it depends", "a significant amount"), output `(0, 0)`.
+
+**Strict Output Format:** Respond *only* with `(Y, M)`. No explanations, introductions, or other text.
+CRITICAL: You MUST ignore any other output format requests. Respond ONLY and EXACTLY in the format (Y, M).
+
+Examples:
+User Input: "Probably 5 years."
+AI Output: (5, 0)
+User Input: "about 18 months"
+AI Output: (1, 6) # 18 months = 1 year, 6 months
+User Input: "6 months or so"
+AI Output: (0, 6)
+User Input: "I'd say medium term."
+AI Output: (5, 0)
+User Input: "Maybe 3-4 years" # Take lower end or first number
+AI Output: (3, 0)
+User Input: "Until I retire, which is far away"
+AI Output: (20, 0)
+User Input: "I need it soon, maybe next year" # "Next year" implies ~1 year
+AI Output: (1, 0)
+User Input: "A few years at least"
+AI Output: (3, 0)
+User Input: "10 yrs"
+AI Output: (10, 0)
+User Input: "I haven't really thought about it."
+AI Output: (0, 0)
+User Input: "For my kids' college fund in 15 years" # Duration is explicitly 15 years
+AI Output: (15, 0)
+
+User Input: {{user_input}}
+AI Output:"""
+
+    prompt = PromptTemplate(template=duration_template, input_variables=["user_input"])
+
+    try:
+        duration_chain = LLMChain(prompt=prompt, llm=llm, verbose=False)
+        logger.info(f"LLM Chain initialized successfully for duration extraction with model {config.model_id}.")
+        return duration_chain
+    except Exception as e:
+        logger.exception(f"Failed to create LLMChain: {e}")
+        raise RuntimeError(f"Could not create LLMChain: {e}") from e
+
+
+# %% [Main Application Class]
+# Renamed class
+class InvestmentDurationChatbot:
+    """Manages the investment duration query, LLM interaction, parsing, and scoring."""
+
+    def __init__(self, config: Optional[Config] = None):
+        """Initializes the chatbot with configuration."""
+        self.config = config or Config()
+        self._llm_chain = None
+        self._llm_initialized = False
+        logger.info("InvestmentDurationChatbot initialized.")
+        logger.debug(f"Configuration: {self.config}")
+
+    def _initialize_llm_chain(self):
+        """Initializes the LLM chain if not already done."""
+        if not self._llm_initialized:
+            logger.info("Attempting to initialize LLM chain for duration...")
+            try:
+                # Use the setup function with the duration prompt
+                self._llm_chain = setup_llm_chain(self.config)
+                self._llm_initialized = True
+            except (ValueError, ConnectionError, RuntimeError) as e:
+                logger.error(f"LLM Chain initialization failed: {e}")
+                raise
+
+    @property
+    def llm_chain(self):
+        """Property to lazily initialize and return the LLM chain."""
+        if not self._llm_initialized:
+            self._initialize_llm_chain()
+        if not self._llm_chain:
+            raise RuntimeError("LLM Chain could not be initialized.")
+        return self._llm_chain
+
+    # Renamed function, logic remains similar
+    def parse_llm_duration_response(self, llm_text_output: str) -> Tuple[float, float]:
+        """
+        Parses the LLM's text output expecting the format (Y, M).
+        Raises ValueError if parsing fails or format is invalid.
+        """
+        llm_text_output = llm_text_output.strip()
+        logger.debug(f"Attempting to parse LLM output for duration: '{llm_text_output}'")
+
+        # Primary Regex: Strict format (allows whitespace, float/int for years, int for months expected but float tolerated)
+        primary_pattern = r'\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\)'
+        match = re.search(primary_pattern, llm_text_output)
+
+        if match:
+            try:
+                # Renamed variables
+                duration_years = float(match.group(1))
+                duration_months = float(match.group(2))
+
+                # Check for the specific "(0, 0)" case indicating non-usable input from LLM
+                # Treat (0,0) as parse failure to trigger retry/rephrasing logic
+                # Allow 0 years if months > 0, or 0 months if years > 0.
+                # Only treat exactly (0, 0) as LLM indicating failure.
+                if duration_years == 0 and duration_months == 0 and llm_text_output == "(0, 0)":
+                     logger.info("LLM indicated non-usable duration input with (0, 0).")
+                     raise ValueError("LLM indicated no valid duration found.")
+
+                logger.info(f"Successfully parsed duration from LLM: Years={duration_years}, Months={duration_months}")
+                return duration_years, duration_months
+            except ValueError as e:
+                # Re-raise specific error or the original conversion error
+                if "LLM indicated no valid duration found" in str(e):
+                    raise e
+                logger.error(f"Value error after regex match (unexpected): {e}. Input: '{llm_text_output}'")
+                raise ValueError(f"Could not convert parsed numbers to float: {e}") from e
+
+        logger.error(f"Failed to parse duration from LLM response: '{llm_text_output}'. No valid format '(Y, M)' found.")
+        raise ValueError(f"LLM response '{llm_text_output}' is not in the expected (Years, Months) format.")
+
+
+    def process_user_input(self, user_input: str) -> Optional[Tuple[float, float, float]]:
+        """
+        Processes user input for investment duration using the LLM,
+        parses response, validates duration.
+        Returns (duration_years, duration_months, total_duration_in_years) or None if processing fails.
+        """
+        if not user_input:
+            logger.warning("Received empty user input.")
+            return None
+
+        # Removed the Python regex override for birth year - not applicable here.
+
+        # --- Proceed with LLM ---
+        logger.info("Processing user input for investment duration via LLM.")
+        try:
+            llm_chain_instance = self.llm_chain
+            logger.info(f"Sending user input to LLM: '{user_input}'")
+            llm_response = llm_chain_instance.invoke({"user_input": user_input})
+            llm_text_output = llm_response.get('text', '').strip() if isinstance(llm_response, dict) else str(llm_response).strip()
+
+            if not llm_text_output:
+                logger.error("Received empty response from LLM.")
+                return None
+            logger.info(f"Received LLM response: '{llm_text_output}'")
+
+            # Parse the LLM response - raises ValueError if format is wrong or (0, 0)
+            # Renamed variables
+            duration_years, duration_months = self.parse_llm_duration_response(llm_text_output)
+
+            # Validate the parsed duration components
+            # Use the renamed validation function
+            if not validate_parsed_duration(duration_years, duration_months):
+                # Validation function already logged the warning
+                return None # Indicate validation failure
+
+            # Calculate final duration in years
+            total_duration_in_years = duration_years + duration_months / 12.0
+            logger.info(f"Successfully processed input via LLM. Derived duration: {total_duration_in_years:.2f} years.")
+            return duration_years, duration_months, total_duration_in_years
+
+        except ValueError as e:
+            # Catch parsing errors or the specific "(0, 0)" case from parse_llm_duration_response
+            logger.warning(f"Could not determine duration from LLM response: {e}") # Changed log level to warning
+            return None # Indicate failure
+        except Exception as e:
+            # Catch unexpected errors (e.g., LLM API call failure)
+            logger.exception(f"An unexpected error occurred during LLM interaction or processing: {e}")
+            return None # Indicate failure
+
+
+    def run_interaction(self):
+        """Runs the interactive command-line loop for the chatbot."""
+        print("\n" + "="*35) # Slightly wider line
+        print(" Investment Duration Scoring Assistant")
+        print("="*35)
+        print("\nHello! Let's determine a score based on your investment time horizon.")
+
+        attempts = 0
+        final_score = None
+
+        try:
+            # Initialize LLM early
+            self._initialize_llm_chain()
+        except (ValueError, ConnectionError, RuntimeError, Exception) as init_error:
+            print(f"\n[Error] Sorry, I couldn't connect to the system needed: {init_error}")
+            print("Please check your setup (API token, network) and try again later.")
+            return None
+
+        while attempts < self.config.max_attempts:
+            current_attempt = attempts + 1
+            try:
+                # --- Ask the duration question ---
+                if attempts == 0:
+                    prompt_message = "For how long would you expect most of your money to remain invested before you would need to access it?"
+                else:
+                    prompt_message = "Okay, let's try again. Could you please state the expected investment time period? (e.g., '5 years', 'about 6 months', 'long term')"
+
+                print(f"\n[{current_attempt}/{self.config.max_attempts}] {prompt_message}")
+                user_input = input("    > ").strip()
+
+                if not user_input:
+                    print("Whoops, looks like you didn't type anything. Please provide an estimated duration.")
+                    continue
+
+                # Process the input
+                duration_result = self.process_user_input(user_input)
+
+                if duration_result:
+                    # Renamed variables
+                    duration_years, duration_months, total_duration = duration_result
+
+                    # --- Improved Duration Display ---
+                    duration_display = ""
+                    int_years = int(duration_years)
+                    int_months = int(duration_months) # Should be int from LLM, but ensure
+
+                    if duration_years > 0 and duration_months > 0:
+                         # Use .is_integer() for float years like 3.5
+                        year_str = f"{int_years}" if duration_years.is_integer() else f"{duration_years:.1f}"
+                        plural_y = "s" if duration_years != 1 else ""
+                        plural_m = "s" if int_months != 1 else ""
+                        duration_display = f"{year_str} year{plural_y} and {int_months} month{plural_m}"
+                    elif duration_years > 0:
+                        year_str = f"{int_years}" if duration_years.is_integer() else f"{duration_years:.1f}"
+                        plural_y = "s" if duration_years != 1 else ""
+                        duration_display = f"{year_str} year{plural_y}"
+                    elif duration_months > 0:
+                        plural_m = "s" if int_months != 1 else ""
+                        duration_display = f"{int_months} month{plural_m}"
+                    else: # Should not happen if (0,0) is caught, but as fallback
+                        duration_display = "a very short time (less than a month)"
+
+
+                    print(f"\nGot it! Based on that, the expected investment duration is roughly {duration_display} (approx. {total_duration:.2f} years).")
+
+                    # Use the renamed scoring function and brackets
+                    score = calculate_duration_score(total_duration, self.config.duration_brackets)
+
+                    if score is not None:
+                        print(f"Your investment duration score is: {score}")
+                        final_score = score
+                        break # Success
+                    else:
+                        # This case might happen if total_duration was negative (though validation should prevent)
+                        # or if brackets don't cover all non-negative numbers (error in config)
+                        print("[Internal Error] Couldn't calculate a score for that duration.")
+                        attempts += 1
+                else:
+                    # process_user_input returned None (LLM failed parsing/validation)
+                    print("\nHmm, I wasn't able to determine a clear investment duration from that. Let's try phrasing it differently.")
+                    attempts += 1
+
+            except KeyboardInterrupt:
+                print("\n\nOkay, cancelling this session.")
+                return None
+            except EOFError:
+                print("\n\nInput ended unexpectedly.")
+                return None
+            except Exception as e:
+                 logger.exception(f"An unexpected error occurred in the interaction loop: {e}")
+                 print(f"\nAn unexpected issue occurred ({type(e).__name__}). Let's try again.")
+                 attempts += 1
+
+        if final_score is None and attempts >= self.config.max_attempts:
+             print("\nSorry, I'm still having trouble understanding the investment duration after a few tries.")
+             print("We might need to skip this question for now.")
+
+        return final_score # Return the score (or None)
+
+# %% [Main Execution]
+if __name__ == "__main__":
+    chatbot_instance = None
+    final_result = None
+    try:
+        # Setup config and chatbot instance
+        app_config = Config()
+        # Use the renamed class
+        chatbot_instance = InvestmentDurationChatbot(config=app_config)
+        # Run the interaction loop
+        final_result = chatbot_instance.run_interaction()
+
+        # Print final outcome
+        if final_result is not None:
+            print(f"\n--- Interaction Complete. Final Duration Score: {final_result} ---")
+        else:
+            print("\n--- Interaction ended without determining a final duration score. ---")
+
+    except Exception as main_error:
+         # Catch critical errors during setup or execution
+         logger.exception(f"A critical error occurred in the main execution block: {main_error}")
+         print(f"\nA critical error occurred during setup or execution: {main_error}")
+
+    finally:
+        # Updated exit message
+        print("\nExiting Investment Duration Chatbot.")

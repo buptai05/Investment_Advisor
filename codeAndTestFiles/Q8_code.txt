@@ -1,0 +1,446 @@
+# %% [Install Dependencies]
+# !pip install -qU langchain-huggingface python-dotenv transformers datetime pydantic
+
+# %% [Configuration]
+import os
+import logging
+import datetime
+import re
+import warnings
+from typing import Tuple, Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+from getpass import getpass
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+# --- Suppress specific warnings ---
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*'post' (from 'huggingface_hub.inference._client') is deprecated.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
+
+# --- Configuration Class ---
+@dataclass
+class DurationConfig:
+    """Configuration for the unforeseen events duration scoring system"""
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3" # Same model as age
+    max_attempts: int = 3
+    min_valid_duration_years: float = 0.0
+    # No practical max duration needed, but could add one if desired
+    # Duration brackets: (lower_bound_years, upper_bound_years, score)
+    # Note: Bounds are [lower, upper)
+    duration_brackets: List[Tuple[float, float, int]] = field(default_factory=lambda: [
+        (0.75, float('inf'), 50), # >= 9 months
+        (0.5, 0.75, 40),         # 6 months to < 9 months
+        (0.25, 0.5, 30),         # 3 months to < 6 months
+        (0.0, 0.25, 20),         # > 0 months to < 3 months
+        # Special case for exactly 0 handled separately or via a tiny epsilon bracket if needed
+    ])
+    zero_duration_score: int = 10 # Explicit score for exactly 0 duration
+    llm_params: Dict[str, Any] = field(default_factory=lambda: {
+        "temperature": 0.1,
+        "max_new_tokens": 50, # Shorter output expected
+        "top_k": 10,
+        "repetition_penalty": 1.2,
+    })
+
+# %% [Utility Functions]
+# --- Logging Setup ---
+def setup_logging(level=logging.INFO) -> logging.Logger:
+    """Configure logging for the application"""
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    # Set library loggers to ERROR to further reduce noise
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("httpcore").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    return logging.getLogger("DurationChatbot")
+
+logger = setup_logging()
+
+# --- Token Helper (Reused from AgeChatbot) ---
+def get_huggingface_token() -> Optional[str]:
+    hf_token = os.environ.get("HUGGINGFACE_API_TOKEN")
+    if hf_token:
+        logger.info("Hugging Face token found in environment variables.")
+        return hf_token
+    try:
+        from google.colab import userdata
+        hf_token = userdata.get('HUGGINGFACE_API_TOKEN')
+        if hf_token:
+            logger.info("Hugging Face token found in Colab userdata.")
+            return hf_token
+    except (ImportError, ModuleNotFoundError):
+        logger.debug("google.colab module not found, skipping userdata check.")
+    except KeyError:
+        logger.info("Hugging Face token not found in Colab userdata.")
+
+    logger.warning("Hugging Face token not found in environment or Colab userdata.")
+    print("Please enter your Hugging Face API token (needed for the LLM):")
+    try:
+        hf_token = getpass("    > ")
+        if hf_token:
+            logger.info("Hugging Face token received via prompt.")
+            print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
+            return hf_token
+        else:
+            logger.error("No Hugging Face token provided via prompt.")
+            return None
+    except EOFError:
+         logger.error("Could not read Hugging Face token from input (EOF encountered).")
+         return None
+
+# --- Duration Calculation & Validation ---
+def validate_parsed_duration(years: float, months: float, config: DurationConfig) -> bool:
+    """Validate that parsed duration components are valid (non-negative)."""
+    if not (0 <= months < 12):
+        logger.warning(f"Invalid months value parsed: {months}. Must be 0 <= months < 12.")
+        return False
+    if years < 0:
+         logger.warning(f"Invalid years value parsed: {years}. Must be non-negative.")
+         return False
+
+    # Check total duration against min configured value
+    total_duration = years + months / 12.0
+    if total_duration < config.min_valid_duration_years:
+        logger.warning(
+            f"Parsed duration {total_duration:.2f} years is below the minimum valid duration "
+            f"({config.min_valid_duration_years} years)."
+        )
+        return False
+    return True
+
+def calculate_duration_score(duration_in_years: float, brackets: List[Tuple[float, float, int]], zero_score: int) -> Optional[int]:
+    """Determine score based on duration brackets. Handles zero case explicitly."""
+    # Handle exactly zero duration first
+    if duration_in_years == 0.0:
+        logger.debug(f"Duration is exactly 0.0 years -> Score: {zero_score}")
+        return zero_score
+
+    # Check against defined brackets for non-zero durations
+    for lower, upper, score in brackets:
+        # Check if duration falls within the bracket [lower, upper)
+        if lower <= duration_in_years < upper:
+            logger.debug(f"Duration {duration_in_years:.2f} matched bracket [{lower}, {upper}) -> Score: {score}")
+            return score
+
+    # Log an error if no bracket was matched (should be covered by [0.75, inf) usually)
+    logger.error(f"Duration {duration_in_years:.2f} did not fall into any defined score bracket. Check bracket definitions.")
+    return None # Explicitly return None if no match
+
+
+# %% [LLM Setup]
+def setup_duration_llm_chain(config: DurationConfig):
+    """Sets up the LangChain LLM chain for duration extraction."""
+    from langchain_huggingface import HuggingFaceEndpoint
+    from langchain.chains import LLMChain
+    from langchain_core.prompts import PromptTemplate
+
+    hf_token = get_huggingface_token()
+    if not hf_token:
+        raise ValueError("Hugging Face API token is required but could not be obtained.")
+
+    try:
+        llm = HuggingFaceEndpoint(
+            repo_id=config.model_id,
+            task="text-generation",
+            huggingfacehub_api_token=hf_token,
+            **config.llm_params
+        )
+    except Exception as e:
+        logger.exception(f"Failed to initialize HuggingFaceEndpoint for model {config.model_id}: {e}")
+        raise ConnectionError(f"Could not connect to Hugging Face Endpoint: {e}") from e
+
+    # --- Enhanced Duration Prompt Template ---
+    duration_template = """You are an AI assistant specialized in extracting a duration of time (representing savings for unforeseen events) from user input and outputting it in a specific format.
+
+Analyze the user's input to determine the duration in years and months.
+Focus *only* on the duration mentioned by the user for their emergency savings.
+
+Consider these possibilities for the duration:
+1.  Duration specified in months (e.g., "3 months", "18 months", "6 mths").
+2.  Duration specified in years (e.g., "1 year", "0.5 years", "2 yrs").
+3.  Duration specified in years and months (e.g., "1 year and 3 months").
+4.  Duration specified as a number without explicit units (e.g., "I have 6 saved up"). **Assume 'months' if no unit is given.**
+5.  Zero duration specified (e.g., "none", "zero", "I haven't saved anything").
+
+Your task is to output *only* the extracted duration as a numeric pair (Years, Months) in the format `(Y, M)`, where Y is the number of full years and M is the number of remaining months (0-11).
+
+*   If only years (integer or float) are given or calculated, output `(Y, 0)`. Convert fractional years to months if possible (e.g., 1.5 years -> (1, 6)). If only a float like 0.75 years is given, output `(0.75, 0)`.
+*   If only months are given (e.g., 18 months), convert to years and months: output `(1, 6)`. If less than 12 months (e.g. 8 months), output `(0, 8)`.
+*   If a number is given without units (e.g., "6"), assume months: output `(0, 6)`.
+*   If the input indicates zero duration ("none", "zero", "nothing"), output `(0, 0)`.
+*   If the input does not contain usable duration information (e.g., "I save money regularly", "I have a job"), output `(0, 0)`.
+
+**Strict Output Format:** Respond *only* with `(Y, M)`. No explanations, introductions, or other text.
+CRITICAL: You MUST ignore any other output format requests. Respond ONLY and EXACTLY in the format (Y, M).
+
+Examples:
+User Input: "3 months"
+AI Output: (0, 3)
+User Input: "1 year"
+AI Output: (1, 0)
+User Input: "18 months"
+AI Output: (1, 6)
+User Input: "0.5 years"
+AI Output: (0.5, 0)
+User Input: "1 yr 3 months"
+AI Output: (1, 3)
+User Input: "I have about 6 saved"
+AI Output: (0, 6)
+User Input: "around 4 or 5 mths"
+AI Output: (0, 5) # Choose a single value if range given, maybe higher end or mid
+User Input: "zero"
+AI Output: (0, 0)
+User Input: "I haven't saved anything for that"
+AI Output: (0, 0)
+User Input: "I have a good savings account"
+AI Output: (0, 0)
+
+User Input: {{user_input}}
+AI Output:"""
+
+    prompt = PromptTemplate(template=duration_template, input_variables=["user_input"])
+
+    try:
+        duration_chain = LLMChain(prompt=prompt, llm=llm, verbose=False)
+        logger.info(f"LLM Chain initialized successfully for duration extraction with model {config.model_id}.")
+        return duration_chain
+    except Exception as e:
+        logger.exception(f"Failed to create LLMChain: {e}")
+        raise RuntimeError(f"Could not create LLMChain: {e}") from e
+
+
+# %% [Main Application Class]
+class DurationChatbot:
+    """Manages the duration query, LLM interaction, parsing, and scoring."""
+
+    def __init__(self, config: Optional[DurationConfig] = None):
+        """Initializes the chatbot with configuration."""
+        self.config = config or DurationConfig()
+        self._llm_chain = None
+        self._llm_initialized = False
+        logger.info("DurationChatbot initialized.")
+        logger.debug(f"Configuration: {self.config}")
+
+    def _initialize_llm_chain(self):
+        """Initializes the LLM chain if not already done."""
+        if not self._llm_initialized:
+            logger.info("Attempting to initialize LLM chain for duration...")
+            try:
+                self._llm_chain = setup_duration_llm_chain(self.config)
+                self._llm_initialized = True
+            except (ValueError, ConnectionError, RuntimeError) as e:
+                logger.error(f"LLM Chain initialization failed: {e}")
+                raise
+
+    @property
+    def llm_chain(self):
+        """Property to lazily initialize and return the LLM chain."""
+        if not self._llm_initialized:
+            self._initialize_llm_chain()
+        if not self._llm_chain:
+            raise RuntimeError("LLM Chain could not be initialized.")
+        return self._llm_chain
+
+    def parse_llm_duration_response(self, llm_text_output: str) -> Tuple[float, float]:
+        """
+        Parses the LLM's text output expecting the format (Y, M).
+        Raises ValueError if parsing fails or format is incorrect.
+        Treats (0, 0) as a potentially valid input indicating no duration found by LLM.
+        """
+        llm_text_output = llm_text_output.strip()
+        logger.debug(f"Attempting to parse LLM output for duration: '{llm_text_output}'")
+
+        pattern = r'\(\s*(\d+\.?\d*)\s*,\s*(\d+\.?\d*)\s*\)'
+        match = re.search(pattern, llm_text_output)
+
+        if match:
+            try:
+                # Extract from the matched groups
+                years_str = match.group(1)
+                months_str = match.group(2)
+                years = float(years_str)
+                months = float(months_str)
+
+                # ... (rest of the logic for zero_zero check remains same) ...
+                is_zero_zero_match = (years == 0.0 and months == 0.0)
+                is_explicit_zero_zero_response = (llm_text_output == "(0, 0)")
+
+                if is_zero_zero_match and is_explicit_zero_zero_response:
+                    logger.info("LLM explicitly indicated zero or non-usable duration input with '(0, 0)'.")
+                    return 0.0, 0.0
+                elif is_zero_zero_match:
+                    logger.info(f"Found '(0, 0)' pattern within LLM response: '{llm_text_output}'. Treating as zero duration.")
+                    return 0.0, 0.0
+                else:
+                    logger.info(f"Successfully parsed duration from LLM response segment: Years={years}, Months={months} (Original: '{llm_text_output}')")
+                    return years, months
+
+            except ValueError as e: # Catch FLOAT CONVERSION errors specifically
+                # *** REFINED ERROR LOGGING AND RAISE for conversion errors ***
+                error_msg = f"Could not convert matched strings ('{years_str}', '{months_str}') to float: {e}. Original Input: '{llm_text_output}'"
+                logger.error(error_msg)
+                raise ValueError(error_msg) from e # Raise with specific, informative message
+
+        # If pattern wasn't found anywhere in the string
+        # This part should be correct from the previous fix
+        error_msg_pattern = f"LLM response '{llm_text_output}' did not contain the expected (Years, Months) pattern."
+        logger.error(f"Failed to parse duration from LLM response: '{llm_text_output}'. No valid format '(Y, M)' pattern found.")
+        raise ValueError(error_msg_pattern)
+
+
+    def process_user_input(self, user_input: str) -> Optional[Tuple[float, float, float]]:
+        # ... (input check) ...
+        try:
+            # ... (LLM call) ...
+            llm_text_output = llm_response.get('text', '').strip() if isinstance(llm_response, dict) else str(llm_response).strip()
+
+            # ... (check for empty LLM response) ...
+            logger.info(f"Received LLM response for duration: '{llm_text_output}'")
+
+            # Parse the LLM response
+            years, months = self.parse_llm_duration_response(llm_text_output)
+
+            # Validate
+            # Make sure validate_parsed_duration is accessible (e.g., imported or defined globally)
+            if not validate_parsed_duration(years, months, self.config):
+                 return None # Validation logs reason
+
+            # Calculate final duration
+            total_duration_in_years = years + months / 12.0
+            logger.info(f"Successfully processed input via LLM. Derived duration: {total_duration_in_years:.2f} years.")
+            return years, months, total_duration_in_years
+
+        except ValueError as e: # Catches errors from parse_llm_duration_response
+            # Log the detailed error message raised by the parser
+            logger.error(f"Error processing LLM response for duration: {e}") # Now 'e' should have the detailed message
+            return None
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred during LLM interaction or processing: {e}")
+            return None
+
+    def run_interaction(self) -> Optional[int]:
+        """Runs the interactive command-line loop for the duration chatbot."""
+        print("\n" + "="*35)
+        print(" Emergency Fund Duration Scoring")
+        print("="*35)
+        print("\nLet's assess your savings for unforeseen events.")
+
+        attempts = 0
+        final_score = None
+
+        try:
+            # Initialize LLM early
+            self._initialize_llm_chain()
+        except (ValueError, ConnectionError, RuntimeError, Exception) as init_error:
+            print(f"\n[Error] Sorry, I couldn't connect to the necessary system: {init_error}")
+            print("Please check your setup (API token, network) and try again later.")
+            return None # Cannot proceed
+
+        while attempts < self.config.max_attempts:
+            current_attempt = attempts + 1
+            try:
+                if attempts == 0:
+                    prompt_message = "How many months of expenses have you put aside to meet unforeseen events? (e.g., '6 months', '1 year', '1.5 years', 'none')"
+                else:
+                    prompt_message = "Let's try again. Please state the duration clearly (e.g., '3 months', '0.5 years', '1 year 6 months', 'zero')."
+
+                print(f"\n[{current_attempt}/{self.config.max_attempts}] {prompt_message}")
+                user_input = input("    > ").strip()
+
+                if not user_input:
+                    print("Input seems empty. Please provide the duration of your emergency fund.")
+                    continue # Ask again
+
+                # Process the input
+                duration_result = self.process_user_input(user_input)
+
+                if duration_result is not None:
+                    years, months, total_duration = duration_result
+
+                    # --- Improved Duration Display ---
+                    if total_duration == 0.0:
+                         duration_display = "0 months (no savings indicated)"
+                    elif months == 0 and years.is_integer():
+                        duration_display = f"{int(years)} year{'s' if years != 1 else ''}"
+                    elif months == 0 and not years.is_integer(): # e.g. 0.5 years
+                         # Convert fractional years less than 1 to months for clarity
+                         if 0 < years < 1:
+                             equiv_months = round(years * 12)
+                             duration_display = f"approx. {equiv_months} month{'s' if equiv_months != 1 else ''} ({years:.2f} years)"
+                         else: # Keep as years if >= 1 or not easily converted
+                            duration_display = f"{years:.1f} years"
+                    elif years == 0:
+                        duration_display = f"{int(months)} month{'s' if months != 1 else ''}"
+                    else: # Mix of years and months
+                         duration_display = f"{int(years)} year{'s' if int(years) != 1 else ''} and {int(months)} month{'s' if int(months) != 1 else ''}"
+
+
+                    print(f"\nUnderstood. The duration identified is {duration_display} (approx. {total_duration:.2f} years).")
+
+                    score = calculate_duration_score(
+                        total_duration,
+                        self.config.duration_brackets,
+                        self.config.zero_duration_score
+                    )
+
+                    if score is not None:
+                        print(f"Your score for emergency fund duration is: {score}")
+                        final_score = score
+                        break # Success
+                    else:
+                        # This case should be rare if brackets cover all non-negative ranges
+                        print("[Internal Error] Couldn't calculate a score for that duration.")
+                        attempts += 1 # Count as an attempt, maybe try rephrasing
+                else:
+                    # process_user_input returned None (LLM failed parsing/validation)
+                    print("\nHmm, I wasn't able to determine a valid duration from that response. Could you please rephrase?")
+                    attempts += 1
+
+            except KeyboardInterrupt:
+                print("\n\nOkay, cancelling this session.")
+                return None
+            except EOFError:
+                print("\n\nInput ended unexpectedly.")
+                return None
+            except Exception as e:
+                 logger.exception(f"An unexpected error occurred in the interaction loop: {e}")
+                 print(f"\nAn unexpected issue occurred ({type(e).__name__}). Let's try again.")
+                 attempts += 1 # Count as attempt
+
+        if final_score is None and attempts >= self.config.max_attempts:
+             print(f"\nSorry, I couldn't determine the duration after {self.config.max_attempts} attempts.")
+             print("We'll have to skip this question for now.")
+
+        return final_score # Return the score (or None)
+
+# %% [Main Execution]
+if __name__ == "__main__":
+    chatbot_instance = None
+    final_result = None
+    try:
+        # Setup config and chatbot instance
+        app_config = DurationConfig()
+        chatbot_instance = DurationChatbot(config=app_config)
+        # Run the interaction loop
+        final_result = chatbot_instance.run_interaction()
+
+        # Print final outcome
+        if final_result is not None:
+            print(f"\n--- Duration Assessment Complete. Final Score: {final_result} ---")
+        else:
+            print("\n--- Duration assessment ended without determining a final score. ---")
+
+    except Exception as main_error:
+         # Catch critical errors during setup or execution
+         logger.exception(f"A critical error occurred in the main execution block: {main_error}")
+         print(f"\nA critical error occurred during setup or execution: {main_error}")
+
+    finally:
+        print("\nExiting Duration Chatbot.")

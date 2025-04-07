@@ -1,0 +1,571 @@
+# %% [Test Harness for RiskToleranceChatbot]
+# This cell should be run AFTER the cell containing your RiskToleranceChatbot class definition
+
+import time
+import traceback
+import csv
+import datetime
+from typing import Optional, List, Dict, Any, Literal
+
+# Make sure necessary functions/classes are available from the previous cell
+# (RiskToleranceChatbot, RiskToleranceConfig, setup_logging)
+
+# If logger wasn't defined globally before, define it now for the test harness
+try:
+    logger # Reuse existing logger if available
+except NameError:
+    # If run standalone, set up a basic logger
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger("RiskToleranceTester")
+    # Reduce noise from libraries if needed
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+
+# Define expected outcome categories
+ExpectedOutcomeCategory = Literal['score', 'none', 'fail', 'maybe_score']
+
+def run_rt_test_cases(
+    categories_to_run: Optional[List[str]] = None,
+    ids_to_run: Optional[List[str]] = None
+    ):
+    """
+    Runs a predefined set of test cases against the RiskToleranceChatbot.
+
+    Args:
+        categories_to_run: Optional list of category strings to filter tests.
+        ids_to_run: Optional list of test ID strings to filter tests.
+    """
+    print("--- Starting Risk Tolerance Test Cases ---")
+    if categories_to_run:
+        print(f"Filtering by Categories: {categories_to_run}")
+    if ids_to_run:
+        print(f"Filtering by IDs: {ids_to_run}")
+
+    chatbot_instance: Optional[RiskToleranceChatbot] = None
+    all_results_data: List[Dict[str, Any]] = []
+    app_config: Optional[RiskToleranceConfig] = None
+
+    # --- Initialize Config and Chatbot ---
+    try:
+        app_config = RiskToleranceConfig()
+        chatbot_instance = RiskToleranceChatbot(config=app_config)
+        print("Initializing LLM chain (this may take a moment)...")
+        chatbot_instance._initialize_llm_chain() # Pre-initialize LLM
+        print("Chatbot initialized successfully.")
+        # Store valid scores for checking expected outcomes
+        valid_scores = app_config.valid_scores
+        score_to_description_map = chatbot_instance.score_to_description_map
+
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: Failed to initialize RiskToleranceChatbot: {e}")
+        print(traceback.format_exc()) # Print full traceback for init errors
+        print("\nCannot proceed with tests.")
+        logger.exception("Chatbot initialization failed during test setup.")
+        return
+
+    # --- Define Test Cases ---
+    # Expected Scores: 10, 20, 30, 40, 50, or None
+    test_cases: List[Dict[str, Any]] = [
+        # === Category 1: Basic Input Validation ===
+        {
+            'id': 'RT_TC001', 'category': 'Input Validation', 'description': 'Empty String Input',
+            'prompt': '', 'expected_outcome_category': 'fail', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC002', 'category': 'Input Validation', 'description': 'Whitespace Input',
+            'prompt': '   \t \n', 'expected_outcome_category': 'fail', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC003', 'category': 'Input Validation', 'description': 'Gibberish Input',
+            'prompt': 'asdfghjkl', 'expected_outcome_category': 'none', 'expected_score': None # LLM should return 'none'
+        },
+        {
+            'id': 'RT_TC004', 'category': 'Input Validation', 'description': 'Irrelevant Statement (Hobby)',
+            'prompt': 'I like playing chess.', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC005', 'category': 'Input Validation', 'description': 'Irrelevant Statement (Food)',
+            'prompt': 'What is for dinner?', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC006', 'category': 'Input Validation', 'description': 'Explicit "I dont know"',
+             'prompt': 'I am not sure about my risk tolerance.', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC007', 'category': 'Input Validation', 'description': 'Question about process',
+             'prompt': 'How do you calculate this score?', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+
+        # === Category 2: Direct Option Number Input ===
+        {
+            'id': 'RT_TC008', 'category': 'Direct Option', 'description': 'Option 1 (Score 10)',
+            'prompt': '1', 'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'RT_TC009', 'category': 'Direct Option', 'description': 'Option 2 (Score 20)',
+            'prompt': '2', 'expected_outcome_category': 'score', 'expected_score': 20
+        },
+        {
+            'id': 'RT_TC010', 'category': 'Direct Option', 'description': 'Option 3 (Score 30)',
+            'prompt': '3', 'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'RT_TC011', 'category': 'Direct Option', 'description': 'Option 4 (Score 40)',
+            'prompt': '4', 'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'RT_TC012', 'category': 'Direct Option', 'description': 'Option 5 (Score 50)',
+            'prompt': '5', 'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'RT_TC013', 'category': 'Direct Option', 'description': 'Invalid Option Number (Low)',
+            'prompt': '0', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC014', 'category': 'Direct Option', 'description': 'Invalid Option Number (High)',
+            'prompt': '6', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC015', 'category': 'Direct Option', 'description': 'Option with text',
+            'prompt': 'I think option 2 suits me', 'expected_outcome_category': 'score', 'expected_score': 20 # LLM should understand
+        },
+         {
+            'id': 'RT_TC016', 'category': 'Direct Option', 'description': 'Option spelled out',
+            'prompt': 'Go with number four', 'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'RT_TC017', 'category': 'Direct Option', 'description': 'Option with surrounding text',
+            'prompt': 'Based on the descriptions, I align most closely with 5.', 'expected_outcome_category': 'score', 'expected_score': 50
+        },
+         {
+            'id': 'RT_TC018', 'category': 'Direct Option', 'description': 'Option reference by score',
+            'prompt': 'My score should be 10.', 'expected_outcome_category': 'score', 'expected_score': 10 # Should recognize the score itself
+        },
+
+        # === Category 3: Descriptive Input - Clear Matches ===
+        {
+            'id': 'RT_TC019', 'category': 'Description Match', 'description': 'Clear Match for Score 10 (Capital Protection)',
+            'prompt': 'I absolutely cannot afford to lose any money. Safety first.',
+            'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'RT_TC020', 'category': 'Description Match', 'description': 'Clear Match for Score 10 (No Fluctuations)',
+            'prompt': 'Zero tolerance for market ups and downs. Just protect my principal.',
+            'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'RT_TC021', 'category': 'Description Match', 'description': 'Clear Match for Score 20 (Slightly Better than Savings)',
+            'prompt': 'I want a little more than bank interest, but keep it very safe.',
+            'expected_outcome_category': 'score', 'expected_score': 20
+        },
+         {
+            'id': 'RT_TC022', 'category': 'Description Match', 'description': 'Clear Match for Score 20 (Avoid Volatility)',
+            'prompt': 'Minimal risk, I really dislike seeing my balance go down.',
+            'expected_outcome_category': 'score', 'expected_score': 20
+        },
+        {
+            'id': 'RT_TC023', 'category': 'Description Match', 'description': 'Clear Match for Score 30 (Preserve Capital, Minor Changes)',
+            'prompt': 'I mainly want to keep what I have, but I accept small dips for potential growth.',
+            'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'RT_TC024', 'category': 'Description Match', 'description': 'Clear Match for Score 30 (Some Risk for Higher Returns)',
+            'prompt': 'Willing to take a bit of risk if it helps my money grow over time.',
+            'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'RT_TC025', 'category': 'Description Match', 'description': 'Clear Match for Score 40 (Balanced Approach)',
+            'prompt': 'Looking for a good balance between risk and reward. Comfortable with moderate swings.',
+            'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'RT_TC026', 'category': 'Description Match', 'description': 'Clear Match for Score 40 (Accept Negative Fluctuation)',
+            'prompt': 'I understand markets go down sometimes, that\'s okay if the long-term returns are better.',
+            'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'RT_TC027', 'category': 'Description Match', 'description': 'Clear Match for Score 50 (Highest Returns)',
+            'prompt': 'Maximize my growth potential! That\'s the main goal.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'RT_TC028', 'category': 'Description Match', 'description': 'Clear Match for Score 50 (Accept Short-Term Losses)',
+            'prompt': 'I can stomach large drops in the short term if it means high returns later.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+
+        # === Category 4: Descriptive Input - Ambiguous or Overlapping ===
+        {
+            'id': 'RT_TC029', 'category': 'Ambiguous Input', 'description': 'Vague desire for returns',
+            'prompt': 'I want my money to grow.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 20, 30, 40, 50... or none
+        },
+        {
+            'id': 'RT_TC030', 'category': 'Ambiguous Input', 'description': 'Vague desire for safety',
+            'prompt': 'I want safe investments.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 10, 20, maybe 30... or none
+        },
+        {
+            'id': 'RT_TC031', 'category': 'Ambiguous Input', 'description': 'Mentions both growth and safety vaguely',
+            'prompt': 'I want good returns, but also want it to be safe.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Likely 20 or 30, possibly 40, or none
+        },
+        {
+            'id': 'RT_TC032', 'category': 'Ambiguous Input', 'description': 'Focuses on long-term without specifying risk',
+            'prompt': 'I am investing for the long term future.',
+            'expected_outcome_category': 'none', 'expected_score': None # Doesn't specify risk attitude
+        },
+        {
+            'id': 'RT_TC033', 'category': 'Ambiguous Input', 'description': 'Seems to fit multiple (e.g., 20 & 30)',
+            'prompt': 'Keep it mostly safe, but I don\'t mind tiny risks for a bit more interest.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Leans 20, but could be 30
+        },
+        {
+            'id': 'RT_TC034', 'category': 'Ambiguous Input', 'description': 'Seems to fit multiple (e.g., 30 & 40)',
+            'prompt': 'Willing to accept moderate fluctuations for better potential returns than just keeping capital.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Leans 40, but could be 30
+        },
+        {
+            'id': 'RT_TC035', 'category': 'Ambiguous Input', 'description': 'Using common finance terms vaguely',
+             'prompt': 'I prefer equities.', 'expected_outcome_category': 'maybe_score', 'expected_score': None # Could imply 40/50, but not explicit about risk
+        },
+        {
+            'id': 'RT_TC036', 'category': 'Ambiguous Input', 'description': 'Using common finance terms vaguely',
+             'prompt': 'Bonds seem good.', 'expected_outcome_category': 'maybe_score', 'expected_score': None # Could imply 10/20/30, but not explicit about risk
+        },
+
+        # === Category 5: Handling Distractions ===
+        {
+            'id': 'RT_TC037', 'category': 'Distraction', 'description': 'Includes age but focuses on risk',
+            'prompt': 'I am 65 years old and cannot afford to lose any money.',
+            'expected_outcome_category': 'score', 'expected_score': 10 # Age is distraction
+        },
+        {
+            'id': 'RT_TC038', 'category': 'Distraction', 'description': 'Includes unrelated numbers',
+            'prompt': 'I need returns above 5 percent, but keep it very safe mostly.',
+            'expected_outcome_category': 'score', 'expected_score': 20 # Specific % is a detail, core is low risk + slightly better return
+        },
+        {
+            'id': 'RT_TC039', 'category': 'Distraction', 'description': 'Includes hobbies/life details',
+            'prompt': 'I enjoy gardening and want to maximize my growth potential with investments.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'RT_TC040', 'category': 'Distraction', 'description': 'Long input with relevant info embedded',
+            'prompt': 'Well, considering my financial goals and the current market, plus what my friend told me, I think ultimately I\'m okay with market swings if the long-term returns are good. A balanced strategy seems right.',
+            'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'RT_TC041', 'category': 'Distraction', 'description': 'Mentions specific amount (irrelevant to tolerance)',
+             'prompt': 'I have $10,000 to invest and I want zero fluctuations.',
+             'expected_outcome_category': 'score', 'expected_score': 10 # Amount is irrelevant
+        },
+
+        # === Category 6: Format Adherence & Robustness ===
+        {
+            'id': 'RT_TC042', 'category': 'Format Adherence', 'description': 'Input with typo',
+            'prompt': 'Very high risk taker, seek highest retuns.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'RT_TC043', 'category': 'Format Adherence', 'description': 'Input contains parentheses',
+             'prompt': 'I want to preserve capital (mostly) but accept minor changes.',
+             'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'RT_TC044', 'category': 'Format Adherence', 'description': 'Multi-sentence Input',
+             'prompt': 'Hi. I fit description 1. Protect my capital.',
+             'expected_outcome_category': 'score', 'expected_score': 10
+        },
+         {
+            'id': 'RT_TC045', 'category': 'Format Adherence', 'description': 'Input with Emoji',
+             'prompt': 'Go for max growth! 🚀',
+             'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'RT_TC046', 'category': 'Format Adherence', 'description': 'Asking for explanation (Breaking)',
+             'prompt': 'I choose option 4. Why is that score 40?',
+             'expected_outcome_category': 'score', 'expected_score': 40 # Expect LLM *only* outputs 40.
+        },
+        {
+            'id': 'RT_TC047', 'category': 'Format Adherence', 'description': 'Input looks like output score (Breaking)',
+             'prompt': 'My risk score isn\'t 20, it should be 30.',
+             'expected_outcome_category': 'score', 'expected_score': 30 # Expect LLM to parse statement -> 30.
+        },
+        {
+             'id': 'RT_TC048', 'category': 'Format Adherence', 'description': 'Requesting different format (Breaking)',
+             'prompt': 'I am a very high risk taker. Please respond with "Risk: High".',
+             'expected_outcome_category': 'score', 'expected_score': 50 # Expect LLM to ignore request -> 50.
+        },
+        {
+             'id': 'RT_TC049', 'category': 'Format Adherence', 'description': 'Input uses list format',
+             'prompt': 'Priorities: 1. Safety. 2. No losses.',
+             'expected_outcome_category': 'score', 'expected_score': 10
+        },
+
+        # === Category 7: Edge Cases ===
+        {
+            'id': 'RT_TC050', 'category': 'Edge Case - Language', 'description': 'Non-English statement (if model supports)',
+            'prompt': 'Quiero proteger mi capital.', # Spanish for "I want to protect my capital."
+            'expected_outcome_category': 'maybe_score', 'expected_score': 10 # Depends heavily on model capability
+        },
+        {
+            'id': 'RT_TC051', 'category': 'Edge Case - Context Sim', 'description': 'Correction Statement',
+             'prompt': 'Wait, no, forget that. I actually seek the highest possible returns.',
+             'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'RT_TC052', 'category': 'Edge Case - Context Sim', 'description': 'Adding Detail Statement',
+             'prompt': 'And I really hate seeing short term volatility.', # Assumes previous context leaned towards growth
+             'expected_outcome_category': 'score', 'expected_score': 20 # LLM should focus on this sentence, implying low risk
+        },
+                {
+            'id': 'RT_TC053', 'category': 'Edge Case - Complex Sentence Contrasting',
+            'description': 'Complex sentence contrasting desires, concluding lower risk', # Added
+             'prompt': 'While the allure of high returns is tempting (like level 5), my primary need is capital preservation with minimal fluctuation, placing me closer to level 2.',
+             'expected_outcome_category': 'score', 'expected_score': 20
+        },
+        {
+             'id': 'RT_TC054', 'category': 'Edge Case - Figurative Language',
+             'description': 'Figurative language indicating strong risk aversion', # Added
+             'prompt': 'I don\'t want to lose my shirt in the market.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None
+        },
+        {
+            'id': 'RT_TC055', 'category': 'Edge Case - Focus Shift',
+            'description': 'Shift from aggressive to balanced approach', # Added
+             'prompt': 'I used to be a very aggressive investor, but now I prefer a balanced approach.',
+             'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+             'id': 'RT_TC056', 'category': 'Edge Case - Very Short Relevant',
+             'description': 'Very short input implying high risk aversion', # Added
+             'prompt': 'Safety.',
+             'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+             'id': 'RT_TC057', 'category': 'Edge Case - Very Short Relevant',
+             'description': 'Very short input implying desire for growth', # Added
+             'prompt': 'Growth.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None
+        },
+         {
+             'id': 'RT_TC058', 'category': 'Edge Case - Very Short Relevant',
+             'description': 'Very short input implying balanced approach', # Added
+             'prompt': 'Balanced.',
+             'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+             'id': 'RT_TC059', 'category': 'Edge Case - Contradictory Statement',
+             'description': 'Contradictory desire for max returns with zero risk', # Added
+             'prompt': 'I want maximum possible returns with absolutely zero risk.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None
+        },
+        {
+             'id': 'RT_TC060', 'category': 'Edge Case - Comparative Statement',
+             'description': 'Comparative statement implying moderate risk', # Added
+             'prompt': 'More risk than just savings, less than pure stocks.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None
+        },
+        # === FINAL ===
+    ]
+
+    # --- Update Test Count for Reporting ---
+    total_tests = len(test_cases)
+    print(f"Total number of test cases defined: {total_tests}")
+
+    # --- Run Tests ---
+    results_summary = {'passed': 0, 'failed': 0, 'maybe': 0, 'total': total_tests}
+    for i, test in enumerate(test_cases):
+        test_id = test.get('id', f'RT_TC{i+1:03d}')
+
+        # --- Filtering Logic ---
+        run_this_test = True
+        if categories_to_run and test['category'] not in categories_to_run:
+            run_this_test = False
+        if ids_to_run and test_id not in ids_to_run:
+            run_this_test = False
+
+        if not run_this_test:
+            # print(f"\n--- Skipping Test Case {i+1}/{total_tests} [{test_id}] ---")
+            continue
+        # --- End Filtering ---
+
+        print(f"\n--- Test Case {i+1}/{total_tests} [{test_id} / {test['category']}] ---")
+        print(f"Description: {test['description']}")
+        display_prompt = test['prompt']
+        print(f"Input: \"{display_prompt}\"")
+        print(f"Expected Outcome Category: {test['expected_outcome_category']}")
+        if test['expected_score'] is not None:
+            print(f"Expected Score: {test['expected_score']}")
+
+        actual_score: Optional[int] = None
+        duration: float = -1.0
+        processing_details: str = "N/A"
+        actual_outcome_category: ExpectedOutcomeCategory = 'fail' # Default to fail
+
+        # --- Execute the core logic with Timing ---
+        try:
+            start_time = time.monotonic()
+            # Use the chatbot instance's processing method
+            actual_score = chatbot_instance.process_user_input(test['prompt'])
+            duration = time.monotonic() - start_time
+
+            # Determine actual outcome category based on result
+            if actual_score is not None:
+                if actual_score in valid_scores:
+                     actual_outcome_category = 'score'
+                     processing_details = f"Processed Score: {actual_score}"
+                else:
+                     # This case should ideally not happen if parse_llm_risk_response works correctly
+                     actual_outcome_category = 'fail'
+                     processing_details = f"ERROR: process_user_input returned invalid score: {actual_score}"
+                     logger.error(f"Test {test_id}: process_user_input returned invalid score {actual_score}")
+                     actual_score = None # Reset actual_score as it's invalid
+            else:
+                # process_user_input returns None if LLM returned 'none' or parsing failed/errored
+                # Check logs or chatbot state if more detail is needed on why None was returned
+                if test['prompt'].strip() == "": # Specific check for known 'fail' case (empty input) handled before LLM
+                    actual_outcome_category = 'fail'
+                    processing_details = "Input was empty or whitespace, process_user_input correctly returned None (handled as fail)."
+                else:
+                    actual_outcome_category = 'none' # Assume 'none' LLM output or parse failure otherwise
+                    processing_details = "process_user_input returned None (Indicates 'none' from LLM or parse failure)"
+
+
+        except Exception as e:
+            duration = time.monotonic() - start_time if 'start_time' in locals() else -1.0
+            logger.error(f"Exception during test case {test_id} ('{test['description']}'): {e}", exc_info=True)
+            print(f"  ERROR: Exception occurred during processing: {e}")
+            actual_outcome_category = 'fail' # Exception means failure
+            processing_details = f"Exception: {type(e).__name__}: {str(e)[:100]}..."
+            actual_score = None # Ensure score is None on exception
+        # --- End Core Logic ---
+
+        # --- Evaluate Result ---
+        result_status = "FAIL"
+        log_prefix = "🔴"
+
+        expected_cat = test['expected_outcome_category']
+        expected_score_val = test['expected_score']
+
+        if expected_cat == actual_outcome_category:
+            # Categories match, now check score if expected category is 'score'
+            if expected_cat == 'score':
+                if actual_score == expected_score_val:
+                    result_status = "PASS"
+                    log_prefix = "✅"
+                    results_summary['passed'] += 1
+                else:
+                    # Category matched ('score') but the score value itself was wrong
+                    result_status = f"FAIL (Wrong Score - Got {actual_score}, Expected {expected_score_val})"
+                    results_summary['failed'] += 1
+            elif expected_cat == 'fail':
+                 # Explicit fail category matched (e.g., empty input)
+                 result_status = "PASS"
+                 log_prefix = "✅"
+                 results_summary['passed'] += 1
+            else: # 'none' category matched
+                result_status = "PASS"
+                log_prefix = "✅"
+                results_summary['passed'] += 1
+        elif expected_cat == 'maybe_score':
+             # For 'maybe_score', accept 'score' (with any valid score) or 'none' as plausible outcomes
+             if actual_outcome_category == 'score' or actual_outcome_category == 'none':
+                 result_status = f"INFO (Maybe - Plausible Outcome: {actual_outcome_category.capitalize()})"
+                 log_prefix = "🤔"
+                 results_summary['maybe'] += 1
+             else: # If it failed unexpectedly (e.g., exception)
+                 result_status = f"FAIL (Expected Maybe, Got {actual_outcome_category.capitalize()})"
+                 results_summary['failed'] += 1
+        else: # Categories mismatch (and not maybe)
+            # Example: Expected 'score', got 'none' OR Expected 'none', got 'score' OR Expected 'score', got 'fail'
+            result_status = f"FAIL (Category Mismatch - Got {actual_outcome_category}, Expected {expected_cat})"
+            results_summary['failed'] += 1
+
+
+        print(f"  {log_prefix} Result: {result_status}")
+        print(f"      Actual Outcome Category: {actual_outcome_category}")
+        print(f"      Duration: {duration:.4f} sec")
+        print(f"      Processing Details: {processing_details}")
+        if actual_score is not None:
+             print(f"      Actual Score: {actual_score}")
+
+
+        # --- Store result for CSV ---
+        result_row: Dict[str, Any] = {
+            "RunTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "TestID": test_id,
+            "Category": test['category'],
+            "Description": test['description'],
+            "InputPrompt": test['prompt'],
+            "ExpectedOutcomeCategory": test['expected_outcome_category'],
+            "ExpectedScore": str(test['expected_score']) if test['expected_score'] is not None else "",
+            "ActualOutcomeCategory": actual_outcome_category,
+            "ActualScore": str(actual_score) if actual_score is not None else "",
+            "ResultStatus": result_status.split(" ")[0], # Get main status (PASS/FAIL/INFO)
+            "DurationSec": f"{duration:.4f}",
+            "Notes": processing_details if result_status.startswith("FAIL") or result_status.startswith("INFO") else "" # Add details on fail/info
+        }
+        all_results_data.append(result_row)
+
+        # Optional: Add a small delay between API calls if needed
+        # time.sleep(0.1)
+
+    # --- Print Summary ---
+    print("\n" + "="*30)
+    print("--- Test Summary ---")
+    total_run = results_summary['passed'] + results_summary['failed'] + results_summary['maybe']
+    print(f"Total Tests Run: {total_run} / {total_tests}")
+    print(f"✅ Passed: {results_summary['passed']}")
+    print(f"🔴 Failed: {results_summary['failed']}")
+    print(f"🤔 Maybe (Info): {results_summary['maybe']}")
+    print("="*30)
+
+    # --- Write results to CSV ---
+    print("\n--- Writing Test Results to CSV ---")
+    # Use a specific filename for risk tolerance results
+    results_filename = "risk_tolerance_test_run_latest.csv"
+    if not all_results_data:
+        print("No results data to write.")
+    else:
+        # Define preferred order for CSV columns
+        preferred_order = [
+            "RunTimestamp", "TestID", "Category", "Description", "InputPrompt",
+            "ExpectedOutcomeCategory", "ExpectedScore",
+            "ActualOutcomeCategory", "ActualScore",
+            "ResultStatus", "DurationSec", "Notes"
+        ]
+        # Get all unique keys from data, ensuring preferred order comes first
+        fieldnames_set = set()
+        for row in all_results_data:
+            fieldnames_set.update(row.keys())
+        fieldnames = [f for f in preferred_order if f in fieldnames_set] + \
+                     sorted([f for f in fieldnames_set if f not in preferred_order])
+
+        try:
+            with open(results_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(all_results_data)
+            print(f"Results successfully written to {results_filename}")
+        except Exception as e:
+            print(f"Error writing results to CSV: {e}")
+            logger.error(f"Failed to write results CSV: {e}")
+
+    print("--- Risk Tolerance Testing Complete ---")
+
+# %% [Run Risk Tolerance Tests]
+# This cell executes the test runner function defined above.
+if __name__ == "__main__":
+   # --- Example Usage of Filtering ---
+   # run_rt_test_cases(categories_to_run=['Direct Option', 'Ambiguous Input'])
+   # run_rt_test_cases(ids_to_run=['RT_TC008', 'RT_TC019', 'RT_TC037'])
+
+   # Run all tests (default):
+   run_rt_test_cases()
+
+   print("\nExiting Risk Tolerance test script.")

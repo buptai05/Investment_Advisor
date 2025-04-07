@@ -1,0 +1,648 @@
+# --- START OF FILE test_Financial_Familiarity.py ---
+
+# %% [Test Harness for FinancialFamiliarityChatbot]
+# This cell should be run AFTER the cell containing your FinancialFamiliarityChatbot class definition
+
+import time
+import traceback
+import csv
+import datetime
+import os # Added for environment variable check
+from typing import Optional, List, Dict, Any, Literal
+
+# Ensure necessary classes/functions are available
+# Option 1: Assume they are in the same execution environment (like a Jupyter notebook)
+try:
+    # Make sure FinancialFamiliarityChatbot, FinancialFamiliarityConfig, setup_logging, get_huggingface_token
+    # are defined in the execution scope before running this cell.
+    FinancialFamiliarityChatbot
+    FinancialFamiliarityConfig
+    setup_logging
+    get_huggingface_token # Check if this utility is needed/available globally
+except NameError as e:
+    print(f"ERROR: Necessary component not found: {e}. Make sure Financial_Familiarity_code.py has been executed.")
+    # Depending on setup, you might need to explicitly import:
+    # from Financial_Familiarity_code import FinancialFamiliarityChatbot, FinancialFamiliarityConfig, setup_logging, get_huggingface_token
+    raise RuntimeError("Required classes/functions not defined.") from e
+
+
+# If logger wasn't defined globally before, define it now for the test harness
+try:
+    logger # Reuse existing logger if available
+except NameError:
+    # If run standalone, set up a basic logger
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger("FinancialFamiliarityTester")
+    # Reduce noise from libraries if needed
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+
+# Define expected outcome categories (same as Risk Tolerance harness)
+ExpectedOutcomeCategory = Literal['score', 'none', 'fail', 'maybe_score']
+
+def run_ff_test_cases(
+    categories_to_run: Optional[List[str]] = None,
+    ids_to_run: Optional[List[str]] = None
+    ):
+    """
+    Runs a predefined set of test cases against the FinancialFamiliarityChatbot.
+
+    Args:
+        categories_to_run: Optional list of category strings to filter tests.
+        ids_to_run: Optional list of test ID strings to filter tests.
+    """
+    print("--- Starting Financial Familiarity Test Cases ---")
+    if categories_to_run:
+        print(f"Filtering by Categories: {categories_to_run}")
+    if ids_to_run:
+        print(f"Filtering by IDs: {ids_to_run}")
+
+    # Check for Hugging Face Token early, as it's critical for initialization
+    if not os.environ.get("HUGGINGFACE_API_TOKEN"):
+        try:
+            # Attempt to use the get_huggingface_token function if available and no env var set
+            if get_huggingface_token() is None:
+                 print("\nCRITICAL ERROR: Hugging Face API Token not found or provided.")
+                 print("Set the HUGGINGFACE_API_TOKEN environment variable or provide it when prompted.")
+                 print("Cannot proceed with tests requiring LLM interaction.")
+                 # Optionally, you could allow tests that don't need the LLM to run,
+                 # but most meaningful tests will need it.
+                 return
+        except NameError:
+            # If get_huggingface_token isn't defined in this scope
+            print("\nCRITICAL ERROR: Hugging Face API Token not found in environment variables.")
+            print("Set the HUGGINGFACE_API_TOKEN environment variable.")
+            print("Cannot proceed with tests requiring LLM interaction.")
+            return
+        except Exception as token_err:
+             print(f"\nCRITICAL ERROR: Failed during token check: {token_err}")
+             return
+
+
+    chatbot_instance: Optional[FinancialFamiliarityChatbot] = None
+    all_results_data: List[Dict[str, Any]] = []
+    app_config: Optional[FinancialFamiliarityConfig] = None
+
+    # --- Initialize Config and Chatbot ---
+    try:
+        app_config = FinancialFamiliarityConfig()
+        chatbot_instance = FinancialFamiliarityChatbot(config=app_config)
+        print("Initializing LLM chain (this may take a moment)...")
+        # Use the property accessor which handles initialization
+        _ = chatbot_instance.llm_chain # Access the property to trigger initialization
+        print("Chatbot initialized successfully.")
+        # Store valid scores and mappings for checking expected outcomes
+        valid_scores = app_config.valid_scores
+        score_to_description_map = chatbot_instance.score_to_description_map
+        # Needed to map prompt options (1-5) to expected scores (10-50)
+        option_to_score_map = chatbot_instance.option_to_score_map
+
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: Failed to initialize FinancialFamiliarityChatbot: {e}")
+        print(traceback.format_exc()) # Print full traceback for init errors
+        print("\nCannot proceed with tests.")
+        logger.exception("Chatbot initialization failed during test setup.")
+        return
+
+    # --- Define Test Cases ---
+    # Expected Scores: 10, 20, 30, 40, 50, or None (based on default config)
+    test_cases: List[Dict[str, Any]] = [
+        # === Category 1: Basic Input Validation ===
+        {
+            'id': 'FF_TC001', 'category': 'Input Validation', 'description': 'Empty String Input',
+            'prompt': '', 'expected_outcome_category': 'fail', 'expected_score': None
+        },
+        {
+            'id': 'FF_TC002', 'category': 'Input Validation', 'description': 'Whitespace Input',
+            'prompt': '   \t \n', 'expected_outcome_category': 'fail', 'expected_score': None
+        },
+        {
+            'id': 'FF_TC003', 'category': 'Input Validation', 'description': 'Gibberish Input',
+            'prompt': 'wkejhr wkejrh', 'expected_outcome_category': 'none', 'expected_score': None # LLM should return 'none'
+        },
+        {
+            'id': 'FF_TC004', 'category': 'Input Validation', 'description': 'Irrelevant Statement (Weather)',
+            'prompt': 'What is the weather today?', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'FF_TC005', 'category': 'Input Validation', 'description': 'Irrelevant Statement (Greeting)',
+            'prompt': 'Hello there!', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+        {
+            'id': 'FF_TC006', 'category': 'Input Validation', 'description': 'Explicit "I dont know"',
+             'prompt': 'I don\'t really know much about finance.', 'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 10 or 20, or none
+        },
+        {
+            'id': 'FF_TC007', 'category': 'Input Validation', 'description': 'Question about chatbot',
+             'prompt': 'Can you explain these scores again?', 'expected_outcome_category': 'none', 'expected_score': None
+        },
+
+        # === Category 2: Direct Option Number Input ===
+        {
+            'id': 'FF_TC008', 'category': 'Direct Option', 'description': 'Option 1 (Score 10)',
+            'prompt': '1', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(1, 10) # Use map
+        },
+        {
+            'id': 'FF_TC009', 'category': 'Direct Option', 'description': 'Option 2 (Score 20)',
+            'prompt': '2', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(2, 20)
+        },
+        {
+            'id': 'FF_TC010', 'category': 'Direct Option', 'description': 'Option 3 (Score 30)',
+            'prompt': '3', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(3, 30)
+        },
+        {
+            'id': 'FF_TC011', 'category': 'Direct Option', 'description': 'Option 4 (Score 40)',
+            'prompt': '4', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(4, 40)
+        },
+        {
+            'id': 'FF_TC012', 'category': 'Direct Option', 'description': 'Option 5 (Score 50)',
+            'prompt': '5', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(5, 50)
+        },
+        {
+            'id': 'FF_TC013', 'category': 'Direct Option', 'description': 'Invalid Option Number (Low)',
+            'prompt': '0', 'expected_outcome_category': 'none', 'expected_score': None # LLM should handle invalid number based on prompt
+        },
+        {
+            'id': 'FF_TC014', 'category': 'Direct Option', 'description': 'Invalid Option Number (High)',
+            'prompt': '6', 'expected_outcome_category': 'none', 'expected_score': None # LLM should handle invalid number
+        },
+        {
+            'id': 'FF_TC015', 'category': 'Direct Option', 'description': 'Option with text',
+            'prompt': 'I think option 2 sounds like me', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(2, 20)
+        },
+         {
+            'id': 'FF_TC016', 'category': 'Direct Option', 'description': 'Option spelled out',
+            'prompt': 'Select number four', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(4, 40)
+        },
+        {
+            'id': 'FF_TC017', 'category': 'Direct Option', 'description': 'Option with surrounding text',
+            'prompt': 'After reading the descriptions, I think 5 is the best fit.', 'expected_outcome_category': 'score', 'expected_score': option_to_score_map.get(5, 50)
+        },
+         {
+            'id': 'FF_TC018', 'category': 'Direct Option', 'description': 'Option reference by score (Exact match)',
+            'prompt': 'My familiarity score should be 30.', 'expected_outcome_category': 'score', 'expected_score': 30 # Should recognize the score itself
+        },
+        {
+            'id': 'FF_TC018b', 'category': 'Direct Option', 'description': 'Option reference by score (Near match)',
+            'prompt': 'Score is around 40.', 'expected_outcome_category': 'score', 'expected_score': 40 # Should likely resolve to 40
+        },
+
+
+        # === Category 3: Descriptive Input - Clear Matches ===
+        {
+            'id': 'FF_TC019', 'category': 'Description Match', 'description': 'Clear Match for Score 10 (No Experience)',
+            'prompt': 'I have zero experience with investing or markets.',
+            'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'FF_TC020', 'category': 'Description Match', 'description': 'Clear Match for Score 10 (Complete Beginner)',
+            'prompt': 'Total beginner, know nothing.',
+            'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'FF_TC021', 'category': 'Description Match', 'description': 'Clear Match for Score 20 (Basic Knowledge)',
+            'prompt': 'I understand what stocks and bonds are, basically.',
+            'expected_outcome_category': 'score', 'expected_score': 20
+        },
+         {
+            'id': 'FF_TC022', 'category': 'Description Match', 'description': 'Clear Match for Score 20 (Knows Terms)',
+            'prompt': 'I know some basic terms like bull market and bear market.',
+            'expected_outcome_category': 'score', 'expected_score': 20
+        },
+        {
+            'id': 'FF_TC023', 'category': 'Description Match', 'description': 'Clear Match for Score 30 (Market/Sector Understanding)',
+            'prompt': 'I understand how economic news affects different market sectors.',
+            'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'FF_TC024', 'category': 'Description Match', 'description': 'Clear Match for Score 30 (Fluctuations/Taxes)',
+            'prompt': 'I grasp market ups and downs, and know taxes differ for investments.',
+            'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'FF_TC025', 'category': 'Description Match', 'description': 'Clear Match for Score 40 (Diversification)',
+            'prompt': 'I know it\'s important to spread investments across different assets.',
+            'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'FF_TC026', 'category': 'Description Match', 'description': 'Clear Match for Score 40 (Don\'t put all eggs in one basket)',
+            'prompt': 'You shouldn\'t put all your eggs in one basket with money.',
+            'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'FF_TC027', 'category': 'Description Match', 'description': 'Clear Match for Score 50 (Experienced)',
+            'prompt': 'I\'ve been managing my own portfolio for several years.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'FF_TC028', 'category': 'Description Match', 'description': 'Clear Match for Score 50 (Active Trader)',
+            'prompt': 'I actively trade stocks and options.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+
+        # === Category 4: Descriptive Input - Ambiguous or Overlapping ===
+        {
+            'id': 'FF_TC029', 'category': 'Ambiguous Input', 'description': 'Vague interest',
+            'prompt': 'I\'m interested in learning about investing.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 10 or 20
+        },
+        {
+            'id': 'FF_TC030', 'category': 'Ambiguous Input', 'description': 'Reads financial news',
+            'prompt': 'I read the financial news sometimes.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 20 or 30
+        },
+        {
+            'id': 'FF_TC031', 'category': 'Ambiguous Input', 'description': 'Knows basics + diversification concept vaguely',
+            'prompt': 'I know the basics and that spreading money around is good.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Overlaps 20 and 40
+        },
+        {
+            'id': 'FF_TC032', 'category': 'Ambiguous Input', 'description': 'Uses term "diversification" without context',
+            'prompt': 'Diversification.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 40, but too brief, maybe 20 if just heard term
+        },
+        {
+            'id': 'FF_TC033', 'category': 'Ambiguous Input', 'description': 'Seems to fit multiple (e.g., 20 & 30)',
+            'prompt': 'I know basic terms and follow market news a bit.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Leans 20/30
+        },
+        {
+            'id': 'FF_TC034', 'category': 'Ambiguous Input', 'description': 'Seems to fit multiple (e.g., 30 & 40)',
+            'prompt': 'I understand market moves and the need to diversify holdings.',
+            'expected_outcome_category': 'maybe_score', 'expected_score': None # Overlaps 30 and 40
+        },
+        {
+            'id': 'FF_TC035', 'category': 'Ambiguous Input', 'description': 'Using common finance terms vaguely',
+             'prompt': 'I prefer stocks.', 'expected_outcome_category': 'none', 'expected_score': None # Doesn't describe *familiarity* level
+        },
+        {
+            'id': 'FF_TC036', 'category': 'Ambiguous Input', 'description': 'Vague statement about experience',
+             'prompt': 'I have some experience.', 'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 30, 40, 50?
+        },
+
+        # === Category 5: Handling Distractions ===
+        {
+            'id': 'FF_TC037', 'category': 'Distraction', 'description': 'Includes age but focuses on familiarity',
+            'prompt': 'I am 30 years old and know nothing about stocks.',
+            'expected_outcome_category': 'score', 'expected_score': 10 # Age is distraction
+        },
+        {
+            'id': 'FF_TC038', 'category': 'Distraction', 'description': 'Includes goals but focuses on familiarity',
+            'prompt': 'My goal is retirement, and I understand basic concepts like shares.',
+            'expected_outcome_category': 'score', 'expected_score': 20 # Goal is secondary to stated knowledge
+        },
+        {
+            'id': 'FF_TC039', 'category': 'Distraction', 'description': 'Includes hobbies/life details',
+            'prompt': 'I like hiking and I\'ve been actively managing my investments for years.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'FF_TC040', 'category': 'Distraction', 'description': 'Long input with relevant info embedded',
+            'prompt': 'Well, I read a lot online, and my friend invests, but personally I only know it is important not to put all your eggs in one basket. So I guess I understand diversification.',
+            'expected_outcome_category': 'score', 'expected_score': 40
+        },
+        {
+            'id': 'FF_TC041', 'category': 'Distraction', 'description': 'Mentions specific amount (irrelevant to familiarity)',
+             'prompt': 'I have $5000 and basically no experience.',
+             'expected_outcome_category': 'score', 'expected_score': 10 # Amount is irrelevant
+        },
+
+        # === Category 6: Format Adherence & Robustness ===
+        {
+            'id': 'FF_TC042', 'category': 'Format Adherence', 'description': 'Input with typo',
+            'prompt': 'I have lots of experiense.',
+            'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+            'id': 'FF_TC043', 'category': 'Format Adherence', 'description': 'Input contains parentheses',
+             'prompt': 'I understand market fluctuations (mostly) and different sector impacts.',
+             'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+            'id': 'FF_TC044', 'category': 'Format Adherence', 'description': 'Multi-sentence Input',
+             'prompt': 'Hi. I fit description 4. I know about diversification.',
+             'expected_outcome_category': 'score', 'expected_score': 40
+        },
+         {
+            'id': 'FF_TC045', 'category': 'Format Adherence', 'description': 'Input with Emoji',
+             'prompt': 'Complete beginner here 👍',
+             'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'FF_TC046', 'category': 'Format Adherence', 'description': 'Asking for explanation (Breaking)',
+             'prompt': 'I choose option 3. Why is that score 30?',
+             'expected_outcome_category': 'score', 'expected_score': 30 # Expect LLM *only* outputs 30.
+        },
+        {
+            'id': 'FF_TC047', 'category': 'Format Adherence', 'description': 'Input looks like output score (Breaking)',
+             'prompt': 'My familiarity isn\'t 20, it should be 30 based on sectors.',
+             'expected_outcome_category': 'score', 'expected_score': 30 # Expect LLM to parse statement -> 30.
+        },
+        {
+             'id': 'FF_TC048', 'category': 'Format Adherence', 'description': 'Requesting different format (Breaking)',
+             'prompt': 'I am experienced. Please respond with "Familiarity: High".',
+             'expected_outcome_category': 'score', 'expected_score': 50 # Expect LLM to ignore request -> 50.
+        },
+        {
+             'id': 'FF_TC049', 'category': 'Format Adherence', 'description': 'Input uses list format',
+             'prompt': 'My knowledge: - Basic terms - What stocks are',
+             'expected_outcome_category': 'score', 'expected_score': 20
+        },
+
+        # === Category 7: Edge Cases ===
+        {
+            'id': 'FF_TC050', 'category': 'Edge Case - Language', 'description': 'Non-English statement (if model supports)',
+            'prompt': 'Tengo experiencia en inversiones.', # Spanish for "I have experience in investments."
+            'expected_outcome_category': 'maybe_score', 'expected_score': 50 # Depends heavily on model capability
+        },
+        {
+            'id': 'FF_TC051', 'category': 'Edge Case - Context Sim', 'description': 'Correction Statement',
+             'prompt': 'Wait, I misspoke. I actually know nothing about finance.',
+             'expected_outcome_category': 'score', 'expected_score': 10
+        },
+        {
+            'id': 'FF_TC052', 'category': 'Edge Case - Context Sim', 'description': 'Adding Detail Statement',
+             'prompt': 'And I also understand diversification is key.', # Assumes previous context suggested lower familiarity
+             'expected_outcome_category': 'score', 'expected_score': 40 # LLM should focus on this new info
+        },
+        {
+            'id': 'FF_TC053', 'category': 'Edge Case - Complex Sentence Contrasting',
+            'description': 'Complex sentence contrasting knowledge areas',
+             'prompt': 'While I actively manage my portfolio (like level 5), I admit I don\'t fully grasp all the sector-wise tax implications mentioned in level 3.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None # Could be 40 or 50, ambiguity acknowledged
+        },
+        {
+             'id': 'FF_TC054', 'category': 'Edge Case - Figurative Language',
+             'description': 'Figurative language indicating basic knowledge',
+             'prompt': 'I know enough to be dangerous.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None # Likely implies 20 or 30, but very ambiguous
+        },
+        {
+            'id': 'FF_TC055', 'category': 'Edge Case - Focus Shift',
+            'description': 'Shift from novice to understanding markets',
+             'prompt': 'I used to know nothing, but now I follow market fluctuations.',
+             'expected_outcome_category': 'score', 'expected_score': 30
+        },
+        {
+             'id': 'FF_TC056', 'category': 'Edge Case - Very Short Relevant',
+             'description': 'Very short input implying basic knowledge',
+             'prompt': 'Basics.',
+             'expected_outcome_category': 'score', 'expected_score': 20
+        },
+        {
+             'id': 'FF_TC057', 'category': 'Edge Case - Very Short Relevant',
+             'description': 'Very short input implying diversification knowledge',
+             'prompt': 'Diversification important.',
+             'expected_outcome_category': 'score', 'expected_score': 40
+        },
+         {
+             'id': 'FF_TC058', 'category': 'Edge Case - Very Short Relevant',
+             'description': 'Very short input implying experience',
+             'prompt': 'Experienced.',
+             'expected_outcome_category': 'score', 'expected_score': 50
+        },
+        {
+             'id': 'FF_TC059', 'category': 'Edge Case - Contradictory Statement',
+             'description': 'Claims experience but basic knowledge',
+             'prompt': 'I am experienced but only know the basic terms.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None # Contradictory, likely 20 or 'none'
+        },
+        {
+             'id': 'FF_TC060', 'category': 'Edge Case - Comparative Statement',
+             'description': 'Comparative statement implying intermediate knowledge',
+             'prompt': 'More than a beginner, less than a pro.',
+             'expected_outcome_category': 'maybe_score', 'expected_score': None # Likely 30 or 40
+        },
+        # === FINAL ===
+    ]
+
+    # --- Update Test Count for Reporting ---
+    total_tests = len(test_cases)
+    print(f"Total number of test cases defined: {total_tests}")
+
+    # --- Run Tests ---
+    results_summary = {'passed': 0, 'failed': 0, 'maybe': 0, 'total': total_tests}
+    for i, test in enumerate(test_cases):
+        test_id = test.get('id', f'FF_TC{i+1:03d}') # Use FF prefix
+
+        # --- Filtering Logic ---
+        run_this_test = True
+        if categories_to_run and test['category'] not in categories_to_run:
+            run_this_test = False
+        if ids_to_run and test_id not in ids_to_run:
+            run_this_test = False
+
+        if not run_this_test:
+            # print(f"\n--- Skipping Test Case {i+1}/{total_tests} [{test_id}] ---")
+            continue
+        # --- End Filtering ---
+
+        print(f"\n--- Test Case {i+1}/{total_tests} [{test_id} / {test['category']}] ---")
+        print(f"Description: {test['description']}")
+        display_prompt = test['prompt']
+        print(f"Input: \"{display_prompt}\"")
+        print(f"Expected Outcome Category: {test['expected_outcome_category']}")
+        if test['expected_score'] is not None:
+            print(f"Expected Score: {test['expected_score']}")
+
+        actual_score: Optional[int] = None
+        duration: float = -1.0
+        processing_details: str = "N/A"
+        actual_outcome_category: ExpectedOutcomeCategory = 'fail' # Default to fail
+
+        # --- Execute the core logic with Timing ---
+        try:
+            start_time = time.monotonic()
+            # Use the Financial Familiarity chatbot instance's processing method
+            actual_score = chatbot_instance.process_user_input(test['prompt'])
+            duration = time.monotonic() - start_time
+
+            # Determine actual outcome category based on result
+            if actual_score is not None:
+                if actual_score in valid_scores:
+                     actual_outcome_category = 'score'
+                     processing_details = f"Processed Score: {actual_score}"
+                else:
+                     # This case implies the LLM returned a number not in the expected list (e.g., 25)
+                     # or the parsing logic has a flaw (less likely if parse_llm_familiarity_response validates)
+                     actual_outcome_category = 'fail'
+                     processing_details = f"ERROR: process_user_input returned invalid score: {actual_score}. Expected one of {valid_scores}."
+                     logger.error(f"Test {test_id}: process_user_input returned invalid score {actual_score}")
+                     actual_score = None # Reset actual_score as it's invalid
+            else:
+                # process_user_input returns None if:
+                # 1. Input was empty/whitespace (handled directly) -> 'fail' category
+                # 2. LLM returned 'none' -> 'none' category
+                # 3. LLM returned something unparsable (not 'none', not a number) -> 'none' category (parser returns None)
+                # 4. An LLM communication error occurred -> Exception caught below -> 'fail' category
+
+                # Check for the specific 'fail' case of empty/whitespace input
+                if not test['prompt'].strip():
+                    actual_outcome_category = 'fail'
+                    processing_details = "Input was empty or whitespace, process_user_input correctly returned None (handled as fail)."
+                    # Ensure score is None for reporting consistency, even though it was never set
+                    actual_score = None
+                else:
+                    # Otherwise, None result means LLM likely said 'none' or parsing failed
+                    actual_outcome_category = 'none'
+                    processing_details = "process_user_input returned None (Indicates 'none' from LLM or parse failure)"
+                    # actual_score is already None
+
+
+        except Exception as e:
+            duration = time.monotonic() - start_time if 'start_time' in locals() else -1.0
+            logger.error(f"Exception during test case {test_id} ('{test['description']}'): {e}", exc_info=True)
+            print(f"  ERROR: Exception occurred during processing: {e}")
+            actual_outcome_category = 'fail' # Exception means failure
+            processing_details = f"Exception: {type(e).__name__}: {str(e)[:100]}..."
+            actual_score = None # Ensure score is None on exception
+        # --- End Core Logic ---
+
+        # --- Evaluate Result ---
+        result_status = "FAIL"
+        log_prefix = "🔴"
+
+        expected_cat = test['expected_outcome_category']
+        expected_score_val = test['expected_score']
+
+        if expected_cat == actual_outcome_category:
+            # Categories match, now check score if expected category is 'score'
+            if expected_cat == 'score':
+                if actual_score == expected_score_val:
+                    result_status = "PASS"
+                    log_prefix = "✅"
+                    results_summary['passed'] += 1
+                else:
+                    # Category matched ('score') but the score value itself was wrong
+                    result_status = f"FAIL (Wrong Score - Got {actual_score}, Expected {expected_score_val})"
+                    results_summary['failed'] += 1
+            elif expected_cat == 'fail':
+                 # Explicit fail category matched (e.g., empty input, or an unexpected exception occurred when 'fail' was expected)
+                 result_status = "PASS"
+                 log_prefix = "✅"
+                 results_summary['passed'] += 1
+            else: # 'none' category matched
+                result_status = "PASS"
+                log_prefix = "✅"
+                results_summary['passed'] += 1
+        elif expected_cat == 'maybe_score':
+             # For 'maybe_score', accept 'score' (with *any* valid score) or 'none' as plausible outcomes
+             if actual_outcome_category == 'score' or actual_outcome_category == 'none':
+                 result_status = f"INFO (Maybe - Plausible Outcome: {actual_outcome_category.capitalize()})"
+                 if actual_outcome_category == 'score':
+                      result_status += f" Score: {actual_score}" # Add the score obtained in maybe cases
+                 log_prefix = "🤔"
+                 results_summary['maybe'] += 1
+             else: # If it failed unexpectedly (e.g., exception or invalid score)
+                 result_status = f"FAIL (Expected Maybe, Got {actual_outcome_category.capitalize()})"
+                 results_summary['failed'] += 1
+        else: # Categories mismatch (and not maybe)
+            # Example: Expected 'score', got 'none' OR Expected 'none', got 'score' OR Expected 'score', got 'fail'
+            result_status = f"FAIL (Category Mismatch - Got {actual_outcome_category}, Expected {expected_cat})"
+            if actual_outcome_category == 'score' and expected_cat != 'score':
+                 result_status += f" Unexpected Score: {actual_score}" # Add score info if mismatch involves getting a score unexpectedly
+            results_summary['failed'] += 1
+
+
+        print(f"  {log_prefix} Result: {result_status}")
+        print(f"      Actual Outcome Category: {actual_outcome_category}")
+        print(f"      Duration: {duration:.4f} sec")
+        print(f"      Processing Details: {processing_details}")
+        if actual_score is not None and actual_outcome_category == 'score': # Only print score if category is score
+             print(f"      Actual Score: {actual_score}")
+
+
+        # --- Store result for CSV ---
+        result_row: Dict[str, Any] = {
+            "RunTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "TestID": test_id,
+            "Category": test['category'],
+            "Description": test['description'],
+            "InputPrompt": test['prompt'],
+            "ExpectedOutcomeCategory": test['expected_outcome_category'],
+            "ExpectedScore": str(test['expected_score']) if test['expected_score'] is not None else "",
+            "ActualOutcomeCategory": actual_outcome_category,
+            "ActualScore": str(actual_score) if actual_score is not None else "",
+            "ResultStatus": result_status.split(" ")[0], # Get main status (PASS/FAIL/INFO)
+            "DurationSec": f"{duration:.4f}",
+            "Notes": processing_details if result_status.startswith("FAIL") or result_status.startswith("INFO") else result_status # Add details on fail/info, include score if needed
+        }
+        # Refine notes for maybe cases to include score if available
+        if result_status.startswith("INFO (Maybe") and actual_score is not None:
+            result_row["Notes"] = f"Plausible Outcome: Score: {actual_score}"
+        elif result_status.startswith("INFO (Maybe") and actual_score is None:
+             result_row["Notes"] = f"Plausible Outcome: None"
+
+
+        all_results_data.append(result_row)
+
+        # Optional: Add a small delay between API calls if needed to avoid rate limits
+        # time.sleep(0.1)
+
+    # --- Print Summary ---
+    print("\n" + "="*30)
+    print("--- Test Summary ---")
+    total_run = results_summary['passed'] + results_summary['failed'] + results_summary['maybe']
+    # Filter out skipped tests if filtering was applied
+    skipped_tests = total_tests - total_run if (categories_to_run or ids_to_run) else 0
+    print(f"Total Tests Defined: {total_tests}")
+    if skipped_tests > 0:
+         print(f"Total Tests Skipped: {skipped_tests}")
+    print(f"Total Tests Run: {total_run}")
+    print(f"✅ Passed: {results_summary['passed']}")
+    print(f"🔴 Failed: {results_summary['failed']}")
+    print(f"🤔 Maybe (Info): {results_summary['maybe']}")
+    print("="*30)
+
+    # --- Write results to CSV ---
+    print("\n--- Writing Test Results to CSV ---")
+    # Use a specific filename for financial familiarity results
+    results_filename = "financial_familiarity_test_run_latest.csv"
+    if not all_results_data:
+        print("No results data to write (perhaps all tests were skipped or an error occurred before running).")
+    else:
+        # Define preferred order for CSV columns
+        preferred_order = [
+            "RunTimestamp", "TestID", "Category", "Description", "InputPrompt",
+            "ExpectedOutcomeCategory", "ExpectedScore",
+            "ActualOutcomeCategory", "ActualScore",
+            "ResultStatus", "DurationSec", "Notes"
+        ]
+        # Get all unique keys from data, ensuring preferred order comes first
+        fieldnames_set = set()
+        for row in all_results_data:
+            fieldnames_set.update(row.keys())
+        fieldnames = [f for f in preferred_order if f in fieldnames_set] + \
+                     sorted([f for f in fieldnames_set if f not in preferred_order])
+
+        try:
+            with open(results_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(all_results_data)
+            print(f"Results successfully written to {results_filename}")
+        except Exception as e:
+            print(f"Error writing results to CSV: {e}")
+            logger.error(f"Failed to write results CSV: {e}")
+
+    print("--- Financial Familiarity Testing Complete ---")
+
+# %% [Run Financial Familiarity Tests]
+# This cell executes the test runner function defined above.
+# Make sure the FinancialFamiliarityChatbot class etc. are defined before running this.
+if __name__ == "__main__":
+   print("Executing Financial Familiarity test harness...")
+   # --- Example Usage of Filtering ---
+   # run_ff_test_cases(categories_to_run=['Direct Option', 'Ambiguous Input'])
+   # run_ff_test_cases(ids_to_run=['FF_TC008', 'FF_TC019', 'FF_TC037'])
+
+   # Run all tests (default):
+   run_ff_test_cases()
+
+   print("\nExiting Financial Familiarity test script.")
+
+
+# --- END OF FILE test_Financial_Familiarity.py ---

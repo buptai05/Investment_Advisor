@@ -1,0 +1,13 @@
+Input,Test Outcome,Result,Comments
+my cat is turning 2 months old, (0,2), Fail
+next month will my 19th birthday, (0,19), Fail
+my car is 2 month old, (0,2), Fail
+i am 2 year old, (2,0), Fail
+my wedding is in 2 month, (0,2), Fail
+60 days, "Please enter a valid number of months.", Fail
+20 months 1 year, (0,20), Fail
+1 year 20 months, (1,20), Pass
+i have 2 month to complete my studies, (0,2), Fail
+0, "Please enter a valid number of months.", Fail
+zero, "Please enter a valid number of months.", Fail
+(5,2)(2,5), (5,2), Fail

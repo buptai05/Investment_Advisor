@@ -1,0 +1,479 @@
+# %% [Test Harness - Income Percentage Bot]
+# This cell should be run AFTER the cell containing your IncomePercentageBot class definition
+
+import time
+import traceback
+import csv
+import datetime
+from typing import Optional, List, Dict, Any
+
+# Make sure necessary functions/classes are available from the previous cell/module
+# (IncomePercentageBot, Config, calculate_percentage_score, setup_logging)
+
+# If logger wasn't defined globally before, define it now for the test harness
+try:
+    logger
+except NameError:
+    logger = setup_logging(logging.INFO) # Or logging.DEBUG for more detail
+
+def run_income_test_cases(
+    categories_to_run: Optional[List[str]] = None,
+    ids_to_run: Optional[List[str]] = None,
+    # Add any config overrides specific to IncomePercentageBot if needed in the future
+    # e.g., override_llm_params: Optional[Dict[str, Any]] = None
+    ):
+    """
+    Runs a predefined set of test cases against the IncomePercentageBot.
+
+    Args:
+        categories_to_run: Optional list of category strings to filter tests.
+        ids_to_run: Optional list of test ID strings to filter tests.
+        # override_llm_params: Optional dictionary to override default LLM params for testing.
+    """
+    print("--- Starting Income Percentage Bot Test Cases ---")
+    if categories_to_run:
+        print(f"Filtering by Categories: {categories_to_run}")
+    if ids_to_run:
+        print(f"Filtering by IDs: {ids_to_run}")
+
+    bot_instance = None
+    all_results_data = []
+
+    # --- Initialize Config and Bot ---
+    try:
+        # Use the default config defined earlier
+        app_config = Config()
+        # Example of overriding LLM params for a test run if needed:
+        # if override_llm_params:
+        #    app_config.llm_params.update(override_llm_params)
+        #    print(f"Test Config Override: LLM params updated: {override_llm_params}")
+
+        bot_instance = IncomePercentageBot(config=app_config)
+        print("Initializing LLM chain (this may take a moment)...")
+        # Ensure LLM Chain is initialized before running tests
+        bot_instance._initialize_llm_chain()
+        print("IncomePercentageBot initialized successfully.")
+
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: Failed to initialize IncomePercentageBot: {e}")
+        print(traceback.format_exc()) # Print full traceback for init errors
+        print("\nCannot proceed with tests.")
+        logger.exception("IncomePercentageBot initialization failed during test setup.")
+        return
+
+    # --- Define Test Cases ---
+    test_cases = [
+        # === Category 1: Basic Input Validation ===
+        {
+            'id': 'TC_INC_001', 'category': 'Input Validation', 'description': 'Empty String Input',
+            'prompt': '', 'expected': 'fail' # process_user_input should handle this
+        },
+        {
+            'id': 'TC_INC_002', 'category': 'Input Validation', 'description': 'Whitespace Input',
+            'prompt': '   \t \n', 'expected': 'fail' # process_user_input should handle this
+        },
+        {
+            'id': 'TC_INC_003', 'category': 'Input Validation', 'description': 'Gibberish Input',
+            'prompt': 'asdfkljhqwerpoiuyt', 'expected': 'fail' # LLM should return None
+        },
+        {
+            'id': 'TC_INC_004', 'category': 'Input Validation', 'description': 'Irrelevant Statement (No Numbers)',
+            'prompt': 'I like investing in stocks.', 'expected': 'fail' # LLM should return None
+        },
+        {
+            'id': 'TC_INC_005', 'category': 'Input Validation', 'description': 'Explicit "I dont know"',
+            'prompt': 'I don\'t know the percentage.', 'expected': 'fail' # LLM should return None
+        },
+        {
+            'id': 'TC_INC_006', 'category': 'Input Validation', 'description': 'Vague Amount ("a little")',
+            'prompt': 'Just a little bit.', 'expected': 'fail' # LLM should return None per prompt instructions
+        },
+         {
+            'id': 'TC_INC_007', 'category': 'Input Validation', 'description': 'Vague Amount ("not much")',
+            'prompt': 'Not much right now.', 'expected': 'fail' # LLM should return None
+        },
+        {
+            'id': 'TC_INC_008', 'category': 'Input Validation', 'description': 'Non-percentage Number',
+            'prompt': 'My income is 50000 dollars.', 'expected': 'fail' # LLM should return None
+        },
+
+        # === Category 2: Core Percentage Extraction ===
+        {
+            'id': 'TC_INC_009', 'category': 'Core Extraction', 'description': 'Simple Integer Percentage',
+            'prompt': '15', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_010', 'category': 'Core Extraction', 'description': 'Simple Integer with % Sign',
+            'prompt': '25%', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_011', 'category': 'Core Extraction', 'description': 'Simple Integer with "percent"',
+            'prompt': '30 percent', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_012', 'category': 'Core Extraction', 'description': 'Float Percentage',
+            'prompt': '12.5', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_013', 'category': 'Core Extraction', 'description': 'Float Percentage with % Sign',
+            'prompt': '22.75%', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_014', 'category': 'Core Extraction', 'description': 'Float Percentage with "percent"',
+            'prompt': 'About 5.5 percent', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_015', 'category': 'Core Extraction', 'description': 'Percentage in a Sentence',
+            'prompt': 'I think I can save around 40% of my income.', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_016', 'category': 'Core Extraction', 'description': 'Percentage with Leading/Trailing Text',
+            'prompt': 'maybe 8 percent is available', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_017', 'category': 'Core Extraction', 'description': 'Zero Percentage (Number)',
+            'prompt': '0', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_018', 'category': 'Core Extraction', 'description': 'Zero Percentage (Word)',
+            'prompt': 'Zero for now', 'expected': 'score' # LLM Prompt has example for this
+        },
+        {
+            'id': 'TC_INC_019', 'category': 'Core Extraction', 'description': '100 Percentage (Number)',
+            'prompt': '100', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_020', 'category': 'Core Extraction', 'description': '100 Percentage (Sentence)',
+            'prompt': 'Basically 100% can be saved', 'expected': 'score'
+        },
+         {
+            'id': 'TC_INC_021', 'category': 'Core Extraction', 'description': 'Percentage Spelled Out (Simple)',
+            'prompt': 'Twenty percent', 'expected': 'maybe_score' # LLM might convert this, depends on model; current prompt asks for numeric. Let's expect fail due to prompt strictness. Change to fail.
+            # 'expected': 'fail' # Prompt expects numeric, not word conversion.
+        },
+         {
+            'id': 'TC_INC_022', 'category': 'Core Extraction', 'description': 'Leading zero float',
+            'prompt': '0.5%', 'expected': 'score'
+        },
+
+
+        # === Category 3: Validation Logic & Boundaries ===
+        {
+            'id': 'TC_INC_023', 'category': 'Validation - Boundary', 'description': 'Value Below Minimum (Negative)',
+            'prompt': '-10%', 'expected': 'fail' # Validation should catch this after parsing
+        },
+        {
+            'id': 'TC_INC_024', 'category': 'Validation - Boundary', 'description': 'Value Above Maximum',
+            'prompt': '110 percent', 'expected': 'fail' # Validation should catch this
+        },
+        {
+            'id': 'TC_INC_025', 'category': 'Validation - Boundary', 'description': 'Exactly Minimum Valid (0)',
+            'prompt': '0%', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_026', 'category': 'Validation - Boundary', 'description': 'Exactly Maximum Valid (100)',
+            'prompt': '100%', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_027', 'category': 'Validation - Boundary', 'description': 'Slightly Above Minimum (0.01)',
+            'prompt': '0.01%', 'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_028', 'category': 'Validation - Boundary', 'description': 'Slightly Below Maximum (99.99)',
+            'prompt': '99.99%', 'expected': 'score'
+        },
+
+        # === Category 4: Score Bracket Boundaries ===
+        # Brackets: (50.0+eps, inf)->50 | (25.0+eps, 50.0+eps)->40 | (10.0+eps, 25.0+eps)->30 | (0.0+eps, 10.0+eps)->20 | (0.0, 0.0+eps)->10
+        {
+            'id': 'TC_INC_029', 'category': 'Score Boundary', 'description': 'Exactly 0 (Score 10)',
+            'prompt': '0', 'expected': 'score' # Expect score 10
+        },
+        {
+            'id': 'TC_INC_030', 'category': 'Score Boundary', 'description': 'Just Above 0 (Score 20)',
+            'prompt': '0.1', 'expected': 'score' # Expect score 20
+        },
+        {
+            'id': 'TC_INC_031', 'category': 'Score Boundary', 'description': 'Exactly 10 (Score 20)',
+            'prompt': '10%', 'expected': 'score' # Expect score 20
+        },
+        {
+            'id': 'TC_INC_032', 'category': 'Score Boundary', 'description': 'Just Above 10 (Score 30)',
+            'prompt': '10.1%', 'expected': 'score' # Expect score 30
+        },
+        {
+            'id': 'TC_INC_033', 'category': 'Score Boundary', 'description': 'Exactly 25 (Score 30)',
+            'prompt': '25', 'expected': 'score' # Expect score 30
+        },
+        {
+            'id': 'TC_INC_034', 'category': 'Score Boundary', 'description': 'Just Above 25 (Score 40)',
+            'prompt': '25.01 percent', 'expected': 'score' # Expect score 40
+        },
+        {
+            'id': 'TC_INC_035', 'category': 'Score Boundary', 'description': 'Exactly 50 (Score 40)',
+            'prompt': '50%', 'expected': 'score' # Expect score 40
+        },
+        {
+            'id': 'TC_INC_036', 'category': 'Score Boundary', 'description': 'Just Above 50 (Score 50)',
+            'prompt': '50.001', 'expected': 'score' # Expect score 50
+        },
+         {
+            'id': 'TC_INC_037', 'category': 'Score Boundary', 'description': 'Highest Value in Bracket (e.g., <=10)',
+            'prompt': '9.99', 'expected': 'score' # Expect score 20
+        },
+        {
+            'id': 'TC_INC_038', 'category': 'Score Boundary', 'description': 'Highest Value in Bracket (e.g., <=25)',
+            'prompt': '24.999', 'expected': 'score' # Expect score 30
+        },
+         {
+            'id': 'TC_INC_039', 'category': 'Score Boundary', 'description': 'Highest Value in Bracket (e.g., <=50)',
+            'prompt': '49.9999', 'expected': 'score' # Expect score 40
+        },
+
+        # === Category 5: LLM Robustness & Prompt Adherence ===
+        {
+            'id': 'TC_INC_040', 'category': 'LLM Robustness', 'description': 'Input with Multiple Numbers (Select Percentage)',
+            'prompt': 'My salary is 80000, but I can save 15 percent.', 'expected': 'score' # Should extract 15
+        },
+        {
+            'id': 'TC_INC_041', 'category': 'LLM Robustness', 'description': 'Input with Multiple Percentages (Ambiguous - Expect Fail)',
+            'prompt': 'Maybe 5 or 10 percent.', 'expected': 'fail' # Prompt explicitly guides LLM to return None here.
+        },
+         {
+            'id': 'TC_INC_042', 'category': 'LLM Robustness', 'description': 'Input with Range',
+            'prompt': 'Somewhere between 10 and 20 percent.', 'expected': 'fail' # LLM should return None due to ambiguity.
+        },
+        {
+            'id': 'TC_INC_043', 'category': 'LLM Robustness', 'description': 'Input Trying to Break Format (Request Text)',
+            'prompt': 'It\'s 20%. Please confirm this.', 'expected': 'score' # LLM should still output "20" only.
+        },
+        {
+            'id': 'TC_INC_044', 'category': 'LLM Robustness', 'description': 'Input Containing "None"',
+            'prompt': 'The answer is definitely not None, it is 30%', 'expected': 'score' # Should extract 30.
+        },
+        {
+            'id': 'TC_INC_045', 'category': 'LLM Robustness', 'description': 'LLM Adding Extra Text (Simulated Fail)',
+            'prompt': '15', # This tests if the PARSER fallback works, based on user's previous experience
+            'llm_direct_output_override': '15\n\nUser Reply: 0.025\nAI Output:', # Simulate bad LLM output
+            'expected': 'score'
+        },
+        {
+            'id': 'TC_INC_046', 'category': 'LLM Robustness', 'description': 'LLM Returning Non-Numeric Gibberish',
+            'prompt': '5 percent',
+            'llm_direct_output_override': 'Sure, the percentage is five!', # Simulate bad LLM output
+            'expected': 'fail' # Parser should fail
+        },
+         {
+            'id': 'TC_INC_047', 'category': 'LLM Robustness', 'description': 'Input with Typo',
+            'prompt': 'About 12 precent', 'expected': 'score' # LLM should hopefully handle minor typo.
+        },
+        {
+            'id': 'TC_INC_048', 'category': 'LLM Robustness', 'description': 'Input with Emoji',
+            'prompt': 'I can save 25% 👍', 'expected': 'score' # LLM should ignore emoji.
+        },
+
+
+        # === Category 6: Edge Cases ===
+        {
+            'id': 'TC_INC_049', 'category': 'Edge Case - Language', 'description': 'Non-English Percentage',
+            'prompt': 'Puedo ahorrar veinte por ciento.', 'expected': 'maybe_score' # Highly model-dependent if it understands/extracts 'veinte' or fails. Let's expect fail.
+             # 'expected': 'fail'
+        },
+        {
+            'id': 'TC_INC_050', 'category': 'Edge Case - Format', 'description': 'Number with Comma (Incorrect Use)',
+            'prompt': '1,5 %', 'expected': 'score' # LLM might interpret as 1.5 or 15, parser might handle. Let's expect 1.5
+        },
+         {
+            'id': 'TC_INC_051', 'category': 'Edge Case - Performance', 'description': 'Very Long Input',
+            'prompt': 'Blah ' * 100 + ' I think 18% is doable. ' + ' Blah' * 50, 'expected': 'score'
+        },
+
+    ]
+
+    # --- Update Test Count for Reporting ---
+    total_tests = len(test_cases)
+    print(f"Total number of test cases defined: {total_tests}")
+
+    # --- Run Tests ---
+    results = {'passed': 0, 'failed': 0, 'maybe': 0, 'skipped': 0, 'total_run': 0}
+    for i, test in enumerate(test_cases):
+        test_id = test.get('id', f'TC_INC_{i+1:03d}')
+
+        # --- Filtering Logic ---
+        run_this_test = True
+        if categories_to_run and test['category'] not in categories_to_run:
+            run_this_test = False
+        if ids_to_run and test_id not in ids_to_run:
+            run_this_test = False
+
+        if not run_this_test:
+            results['skipped'] += 1
+            continue
+        # --- End Filtering ---
+
+        results['total_run'] += 1
+        print(f"\n--- Test Case {results['total_run']}/{total_tests-results['skipped']} [{test_id} / {test['category']}] ---")
+        print(f"Description: {test['description']}")
+        display_prompt = test['prompt']
+        print(f"Input: \"{display_prompt}\"")
+        print(f"Expected Outcome Type: {test['expected']}")
+
+        actual_score = None
+        percentage_result = None
+        duration = -1.0
+        percentage_details = "N/A"
+        outcome_type = 'fail' # Default to fail
+        llm_raw_output = "N/A (Not Overridden)"
+
+        # --- Execute the core logic with Timing ---
+        try:
+            start_time = time.monotonic()
+
+            # --- Check for LLM Output Override ---
+            if 'llm_direct_output_override' in test:
+                llm_raw_output = test['llm_direct_output_override']
+                logger.info(f"[{test_id}] Using overridden LLM output: '{llm_raw_output}'")
+                # Directly call parsing and validation, bypassing the actual LLM call
+                parsed_percentage = bot_instance.parse_llm_percentage_response(llm_raw_output)
+                if parsed_percentage is not None:
+                     if bot_instance.validate_parsed_percentage(parsed_percentage, bot_instance.config):
+                         percentage_result = parsed_percentage
+                     else:
+                         percentage_details = f"Overridden LLM output '{llm_raw_output}' parsed to {parsed_percentage}, but failed validation."
+                         percentage_result = None # Mark as None due to validation fail
+                else:
+                    percentage_details = f"Overridden LLM output '{llm_raw_output}' failed to parse."
+                    percentage_result = None
+            else:
+                # --- Normal Execution: Call process_user_input ---
+                percentage_result = bot_instance.process_user_input(test['prompt'])
+                # Note: We don't easily get the raw LLM output here unless we modify process_user_input
+
+            duration = time.monotonic() - start_time
+            # --- End LLM/Processing Logic ---
+
+
+            # --- Process Result ---
+            if percentage_result is not None:
+                percentage_details = f"Processed Percentage: {percentage_result:.2f}%"
+                # Calculate score using the bot's config
+                score = calculate_percentage_score(percentage_result, bot_instance.config.percentage_score_brackets_simple)
+                if score is not None:
+                    actual_score = score
+                    outcome_type = 'score'
+                    percentage_details += f" -> Score: {score}"
+                else:
+                    percentage_details += " | Scoring Failed (returned None)"
+                    outcome_type = 'fail' # Treat scoring failure as test failure
+            elif 'llm_direct_output_override' not in test:
+                 # Only log this if it wasn't an override test where failure was expected
+                percentage_details = "process_user_input returned None (Likely LLM='None', parse error, or validation fail)"
+                outcome_type = 'fail'
+            # If it was an override test resulting in None, percentage_details is already set above.
+
+        except Exception as e:
+            duration = time.monotonic() - start_time if 'start_time' in locals() else -1.0
+            logger.error(f"Exception during test case {test_id} ('{test['description']}'): {e}", exc_info=True)
+            print(f"  ERROR: Exception occurred during processing: {e}")
+            outcome_type = 'fail'
+            percentage_details = f"Exception: {type(e).__name__}: {str(e)[:100]}..."
+        # --- End Core Logic ---
+
+        # --- Evaluate Result ---
+        result_status = "FAIL"
+        log_prefix = "🔴"
+
+        if test['expected'] == outcome_type:
+            result_status = "PASS"
+            log_prefix = "✅"
+            results['passed'] += 1
+        elif test['expected'] == 'maybe_score' and outcome_type == 'score':
+             result_status = f"PASS (Maybe - Matched Score)"
+             log_prefix = "✅"
+             results['passed'] += 1 # Count maybe_score that results in score as PASS
+        elif test['expected'] == 'maybe_score' and outcome_type == 'fail':
+            result_status = f"INFO (Maybe - Matched Fail)"
+            log_prefix = "🤔"
+            results['maybe'] += 1
+        else: # Actual mismatch
+            results['failed'] += 1
+
+        print(f"  {log_prefix} Result: {result_status}")
+        print(f"      Actual Outcome Type: {outcome_type}")
+        print(f"      Duration: {duration:.4f} sec")
+        print(f"      Processing Details: {percentage_details}")
+        if actual_score is not None:
+             print(f"      Actual Score: {actual_score}")
+
+        # --- Store result for CSV ---
+        result_row = {
+            "RunTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "TestID": test_id,
+            "Category": test['category'],
+            "Description": test['description'],
+            "InputPrompt": test['prompt'],
+            "ExpectedOutcome": test['expected'],
+            "ActualOutcome": outcome_type,
+            "ResultStatus": result_status.split(" ")[0], # Just PASS/FAIL/INFO
+            "DurationSec": f"{duration:.4f}",
+            "ActualPercentage": f"{percentage_result:.2f}" if percentage_result is not None else "",
+            "ActualScore": str(actual_score) if actual_score is not None else "",
+            "LLMRawOutputOverride": llm_raw_output if 'llm_direct_output_override' in test else "", # Log overridden output
+            "Notes": percentage_details
+        }
+        all_results_data.append(result_row)
+
+        # Optional: Add a small delay between API calls if needed, especially for free tiers
+        # time.sleep(0.2)
+
+    # --- Print Summary ---
+    print("\n" + "="*30)
+    print("--- Test Summary ---")
+    print(f"Total Tests Defined: {total_tests}")
+    print(f"Total Tests Skipped: {results['skipped']}")
+    print(f"Total Tests Run: {results['total_run']}")
+    print(f"✅ Passed: {results['passed']}")
+    print(f"🔴 Failed: {results['failed']}")
+    print(f"🤔 Maybe (Info - Fail): {results['maybe']}")
+    print("="*30)
+
+    # --- Write results to CSV ---
+    print("\n--- Writing Test Results to CSV ---")
+    results_filename = "income_percentage_test_run_latest.csv"
+    if not all_results_data:
+        print("No results data to write.")
+    else:
+        # Dynamically determine fieldnames but prefer a specific order
+        fieldnames_set = set()
+        for row in all_results_data:
+            fieldnames_set.update(row.keys())
+        preferred_order = ["RunTimestamp", "TestID", "Category", "Description", "InputPrompt",
+                           "ExpectedOutcome", "ActualOutcome", "ResultStatus", "DurationSec",
+                           "ActualPercentage", "ActualScore", "LLMRawOutputOverride", "Notes"]
+        fieldnames = [f for f in preferred_order if f in fieldnames_set] + \
+                     sorted([f for f in fieldnames_set if f not in preferred_order])
+
+        try:
+            with open(results_filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(all_results_data)
+            print(f"Results successfully written to {results_filename}")
+        except Exception as e:
+            print(f"Error writing results to CSV: {e}")
+            logger.error(f"Failed to write results CSV: {e}")
+
+    print("--- Testing Complete ---")
+
+
+# %% [Run Tests - Income Percentage]
+# This cell executes the test runner function defined above.
+if __name__ == "__main__":
+   # --- Example Usage of Filtering ---
+   # run_income_test_cases(categories_to_run=['Score Boundary'])
+   # run_income_test_cases(ids_to_run=['TC_INC_015', 'TC_INC_041', 'TC_INC_045'])
+
+   # Run all tests (default):
+   run_income_test_cases()
+
+   print("\nExiting income percentage test script.")

@@ -1,0 +1,425 @@
+# %% [Install Dependencies]
+# !pip install -qU langchain-huggingface python-dotenv transformers datetime pydantic # Assuming already run
+
+# %% [Configuration]
+import os
+import logging
+import datetime
+import re
+import warnings
+from typing import Tuple, Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+from getpass import getpass
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
+# --- Suppress specific warnings ---
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*'post' (from 'huggingface_hub.inference._client') is deprecated.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
+
+# --- Configuration Class ---
+@dataclass
+class AssetAllocationConfig:
+    """Configuration for the asset allocation percentage scoring system"""
+    model_id: str = "mistralai/Mistral-7B-Instruct-v0.3" # Or your preferred model
+    max_attempts: int = 3
+    min_valid_percentage: float = 0.0
+    max_valid_percentage: float = 100.0
+    # Reusing the same bracket structure - interpretation might change (e.g., risk level)
+    # Format: lower bound (inclusive), upper bound (exclusive), score
+    score_brackets: List[Tuple[float, float, int]] = field(default_factory=lambda: [
+        (50.0 + 1e-9, float('inf'), 50), # > 50% in fluctuating assets
+        (25.0 + 1e-9, 50.0 + 1e-9, 40),  # > 25% to <= 50%
+        (10.0 + 1e-9, 25.0 + 1e-9, 30),  # > 10% to <= 25%
+        (0.0 + 1e-9, 10.0 + 1e-9, 20),   # > 0% to <= 10%
+        (0.0, 0.0 + 1e-9, 10)            # Exactly 0%
+    ])
+    llm_params: Dict[str, Any] = field(default_factory=lambda: {
+        "temperature": 0.1,
+        "max_new_tokens": 10, # Still need short response (number or "None")
+        "top_k": 5,
+        "repetition_penalty": 1.1,
+    })
+
+# %% [Utility Functions]
+# --- Logging Setup ---
+def setup_logging(level=logging.INFO) -> logging.Logger:
+    """Configure logging for the application"""
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    # Set library loggers to ERROR to further reduce noise
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("httpcore").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    # Make logger name specific to this bot version
+    return logging.getLogger("AssetAllocationBot")
+
+logger = setup_logging()
+
+# --- Validation ---
+# validate_parsed_percentage remains the same as it checks 0-100 range
+def validate_parsed_percentage(percentage: float, config: AssetAllocationConfig) -> bool:
+    """Validate that parsed percentage is within the configured range."""
+    if not (config.min_valid_percentage <= percentage <= config.max_valid_percentage):
+        logger.warning(
+            f"Parsed percentage {percentage:.2f}% is outside the valid range "
+            f"({config.min_valid_percentage}%-{config.max_valid_percentage}%)."
+        )
+        return False
+    return True
+
+# --- Scoring ---
+# calculate_percentage_score remains the same mechanically
+def calculate_percentage_score(percentage: float, brackets: List[Tuple[float, float, int]]) -> Optional[int]:
+    """Determine score based on percentage brackets. Returns None if no bracket matches."""
+    for lower_inclusive, upper_exclusive, score in brackets:
+        # Check if percentage falls within the bracket [lower, upper)
+        if lower_inclusive <= percentage < upper_exclusive:
+            logger.debug(f"Percentage {percentage:.2f}% matched bracket [{lower_inclusive}, {upper_exclusive}) -> Score: {score}")
+            return score
+    logger.error(f"Percentage {percentage:.2f}% did not fall into any defined score bracket. Check bracket definitions.")
+    return None # Explicitly return None if no match
+
+# %% [LLM Setup]
+# get_huggingface_token remains the same
+def get_huggingface_token() -> Optional[str]:
+    """Retrieves the Hugging Face API token from environment, Colab, or prompt."""
+    hf_token = os.environ.get("HUGGINGFACE_API_TOKEN")
+    if hf_token:
+        logger.info("Hugging Face token found in environment variables.")
+        return hf_token
+    try:
+        from google.colab import userdata
+        hf_token = userdata.get('HUGGINGFACE_API_TOKEN')
+        if hf_token:
+            logger.info("Hugging Face token found in Colab userdata.")
+            return hf_token
+    except (ImportError, ModuleNotFoundError):
+        logger.debug("google.colab module not found, skipping userdata check.")
+    except KeyError:
+        logger.info("Hugging Face token not found in Colab userdata.")
+
+    logger.warning("Hugging Face token not found in environment or Colab userdata.")
+    print("Please enter your Hugging Face API token (needed for the LLM):")
+    try:
+        hf_token = getpass("    > ")
+        if hf_token:
+            logger.info("Hugging Face token received via prompt.")
+            print("Tip: Set the HUGGINGFACE_API_TOKEN environment variable for automatic use next time.")
+            return hf_token
+        else:
+            logger.error("No Hugging Face token provided via prompt.")
+            return None
+    except EOFError:
+         logger.error("Could not read Hugging Face token from input (EOF encountered).")
+         return None
+
+
+def setup_llm_chain(config: AssetAllocationConfig):
+    """Sets up the LangChain LLM chain for asset allocation percentage extraction."""
+    from langchain_huggingface import HuggingFaceEndpoint
+    from langchain.chains import LLMChain
+    from langchain_core.prompts import PromptTemplate
+
+    hf_token = get_huggingface_token()
+    if not hf_token:
+        raise ValueError("Hugging Face API token is required but could not be obtained.")
+
+    try:
+        llm = HuggingFaceEndpoint(
+            repo_id=config.model_id,
+            task="text-generation",
+            huggingfacehub_api_token=hf_token,
+            stop_sequences=["\n", "User Reply:", "AI Output:"], # Keep stop sequences
+            **config.llm_params
+        )
+    except Exception as e:
+        logger.exception(f"Failed to initialize HuggingFaceEndpoint for model {config.model_id}: {e}")
+        raise ConnectionError(f"Could not connect to Hugging Face Endpoint: {e}") from e
+
+    # --- <<< NEW >>> Enhanced Prompt Template for Asset Allocation Percentage ---
+    asset_allocation_template = """You are an AI assistant specialized in extracting numerical data about financial assets.
+The user was asked: "Approximately what percentage of your assets (excluding own use property) is currently held in investment products where the value can fluctuate?"
+Your task is to analyze the user's reply and extract *only* the numerical percentage value they stated regarding these FLUCTUATING investments (like stocks, bonds, mutual funds, crypto, investment properties etc., NOT primary residence or cash in checking/savings).
+
+RULES:
+1. Focus *only* on numbers mentioned as percentages related to the question (often near words like '%', 'percent', 'invested', 'stocks', 'funds', 'fluctuate'). Convert percentage words (like 'fifty') to numbers.
+2. Ignore assets explicitly mentioned as *non*-fluctuating (like primary home, cash, fixed deposits unless part of a fluctuating portfolio).
+3. Ignore any '%' signs or the word 'percent' in the final output.
+4. Output *only* the number itself (e.g., "60", "25.5", "0", "100").
+5. If the user's reply does not contain a clear numerical percentage relevant to the question (e.g., they say "I don't know", "a small part", "mostly cash", use vague ranges like "30-40%"), output the exact word: None
+6. Ignore other numbers in the text like total asset values in currency, ages, income, specific dollar amounts invested unless they explicitly state the percentage. Focus ONLY on the FLUCTUATING ASSET PERCENTAGE.
+
+CRITICAL: Your response MUST be *either* the extracted number as a string *or* the literal word "None". Do NOT include any other text, explanation, or formatting.
+
+Examples:
+User Reply: "About 60% in stocks and funds."
+AI Output: 60
+User Reply: "Maybe twenty-five percent."
+AI Output: 25
+User Reply: "Excluding my house, pretty much all of it, 100%."
+AI Output: 100
+User Reply: "Zero, it's all in savings accounts and my home."
+AI Output: 0
+User Reply: "Very little, maybe 5 percent."
+AI Output: 5
+User Reply: "Around 30 or 40 percent"
+AI Output: None
+User Reply: "I have no idea."
+AI Output: None
+User Reply: "My house is most of it, but maybe 10% of the rest is invested."
+AI Output: 10
+User Reply: "I have $50k in stocks out of $200k liquid assets, so 25%."
+AI Output: 25
+User Reply: "I only own my home and a car."
+AI Output: 0
+User Reply: "I'm 45 years old and have about seventy percent invested."
+AI Output: 70
+User Reply: "Mostly in cash right now."
+AI Output: None # Could infer low %, but safer to rely on explicit statement or 'None'
+User Reply: "Between 10 and 20%"
+AI Output: None
+
+User Reply: {user_reply}
+AI Output:"""
+
+
+    prompt = PromptTemplate(template=asset_allocation_template, input_variables=["user_reply"])
+
+    try:
+        # Renamed variable for clarity
+        allocation_chain = LLMChain(prompt=prompt, llm=llm, verbose=False)
+        logger.info(f"LLM Chain initialized successfully for asset allocation extraction with model {config.model_id}.")
+        return allocation_chain
+    except Exception as e:
+        logger.exception(f"Failed to create LLMChain: {e}")
+        raise RuntimeError(f"Could not create LLMChain: {e}") from e
+
+
+# %% [Main Application Class]
+# Renamed class
+class AssetAllocationBot:
+    """Manages the asset allocation query, LLM interaction, parsing, and scoring."""
+
+    def __init__(self, config: Optional[AssetAllocationConfig] = None):
+        """Initializes the bot with configuration."""
+        self.config = config or AssetAllocationConfig()
+        self._llm_chain = None
+        self._llm_initialized = False
+        logger.info("AssetAllocationBot initialized.") # Updated log
+        logger.debug(f"Configuration: {self.config}")
+
+    def _initialize_llm_chain(self):
+        """Initializes the LLM chain if not already done."""
+        if not self._llm_initialized:
+            logger.info("Attempting to initialize LLM chain...")
+            try:
+                # Uses the setup_llm_chain function which now has the correct prompt
+                self._llm_chain = setup_llm_chain(self.config)
+                self._llm_initialized = True
+            except (ValueError, ConnectionError, RuntimeError) as e:
+                logger.error(f"LLM Chain initialization failed: {e}")
+                # Don't raise here, allow run_interaction to handle it gracefully
+
+    @property
+    def llm_chain(self):
+        """Property to lazily initialize and return the LLM chain."""
+        if not self._llm_initialized:
+            self._initialize_llm_chain()
+        if not self._llm_chain:
+            raise RuntimeError("LLM Chain could not be initialized. Please check token and connection.")
+        return self._llm_chain
+
+    # parse_llm_percentage_response remains the same as it handles number string / 'None'
+    def parse_llm_percentage_response(self, llm_text_output: str) -> Optional[float]:
+        """
+        Parses the LLM's text output expecting a number string or 'None'.
+        Returns the float value of the percentage or None if 'None' is received or parsing fails.
+        """
+        llm_text_output = llm_text_output.strip()
+        logger.debug(f"Attempting to parse LLM output: '{llm_text_output}'")
+
+        if llm_text_output.lower() == 'none':
+            logger.info("LLM indicated no valid percentage found ('None').")
+            return None
+
+        try:
+            match = re.search(r'^(-?\d+\.?\d*)$', llm_text_output)
+            if match:
+                percentage = float(match.group(1))
+                logger.info(f"Successfully parsed percentage from LLM: {percentage}")
+                return percentage
+            else:
+                fallback_match = re.search(r'(-?\d+\.?\d*)', llm_text_output)
+                if fallback_match:
+                     percentage = float(fallback_match.group(1))
+                     logger.warning(f"LLM response '{llm_text_output}' wasn't clean, but extracted number: {percentage}")
+                     return percentage
+                else:
+                    logger.error(f"Failed to parse numeric value from LLM response: '{llm_text_output}'. Not a valid number or 'None'.")
+                    return None
+        except ValueError:
+            logger.error(f"Could not convert LLM response '{llm_text_output}' to a float.")
+            return None
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred during parsing LLM response '{llm_text_output}': {e}")
+            return None
+
+
+    def process_user_input(self, user_input: str) -> Optional[float]:
+        """
+        Processes user input using LLM, parses response, validates percentage.
+        Returns the validated percentage (float) or None if processing fails.
+        """
+        if not user_input:
+            logger.warning("Received empty user input.")
+            return None
+
+        try:
+            llm_chain_instance = self.llm_chain
+            # Updated log message
+            logger.info(f"Sending user input to LLM for asset allocation percentage extraction: '{user_input}'")
+
+            llm_response = llm_chain_instance.invoke({"user_reply": user_input})
+            llm_text_output = llm_response.get('text', '').strip() if isinstance(llm_response, dict) else str(llm_response).strip()
+
+            if not llm_text_output:
+                logger.error("Received empty response from LLM.")
+                return None
+            logger.info(f"Received LLM response: '{llm_text_output}'")
+
+            parsed_percentage = self.parse_llm_percentage_response(llm_text_output)
+
+            if parsed_percentage is None:
+                return None # Indicate failure
+
+            # Use the validation function (unchanged logic, uses config range)
+            if not validate_parsed_percentage(parsed_percentage, self.config):
+                return None # Indicate validation failure
+
+            # Updated log message
+            logger.info(f"Successfully processed input. Validated asset allocation percentage: {parsed_percentage:.2f}%.")
+            return parsed_percentage
+
+        except RuntimeError as e:
+             logger.error(f"LLM Chain Runtime Error: {e}")
+             raise
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred during LLM interaction or processing: {e}")
+            return None # Indicate failure
+
+
+    def run_interaction(self) -> Optional[int]:
+        """Runs the interactive command-line loop for the asset allocation bot."""
+        # Updated titles/prompts
+        print("\n" + "="*65)
+        print(" Asset Allocation Percentage (Fluctuating Investments)")
+        print("="*65)
+        print("\nLet's determine a score based on your investment allocation.")
+
+        try:
+            self._initialize_llm_chain()
+        except (ValueError, ConnectionError, RuntimeError) as init_error:
+            print(f"\n[Error] Sorry, I couldn't set up the connection needed: {init_error}")
+            print("Please check your setup (API token, network) and try again later.")
+            return None
+
+        attempts = 0
+        final_score = None
+
+        while attempts < self.config.max_attempts:
+            current_attempt = attempts + 1
+            try:
+                # --- Updated Question ---
+                if attempts == 0:
+                    prompt_message = ("Approximately what percentage of your assets (excluding own use property) "
+                                      "is currently held in investment products where the value can fluctuate? "
+                                      "(e.g., 60%, 25.5, 0)")
+                else:
+                    prompt_message = (f"Let's try again. Please state the percentage (0-{int(self.config.max_valid_percentage)}) "
+                                      "of non-property assets in fluctuating investments:")
+
+                print(f"\n[{current_attempt}/{self.config.max_attempts}] {prompt_message}")
+                user_input = input("    > ").strip()
+
+                if not user_input:
+                    print("Please enter a value.")
+                    continue
+
+                percentage_result = self.process_user_input(user_input)
+
+                if percentage_result is not None:
+                     # Updated confirmation message
+                    print(f"\nUnderstood. The percentage in fluctuating assets is {percentage_result:.2f}%.")
+
+                    # Calculate score using the brackets from AssetAllocationConfig
+                    score = calculate_percentage_score(percentage_result, self.config.score_brackets)
+
+                    if score is not None:
+                        print(f"Based on this allocation, the score is: {score}")
+                        final_score = score
+                        break # Success
+                    else:
+                        print("[Internal Error] Couldn't calculate a score for that percentage.")
+                        logger.error(f"Scoring error for validated percentage {percentage_result:.2f}. Check bracket logic.")
+                        attempts += 1
+
+                else:
+                    # Updated failure message
+                    print("\nHmm, I couldn't understand that as a percentage between "
+                          f"{int(self.config.min_valid_percentage)}% and {int(self.config.max_valid_percentage)}%. "
+                          "Please focus on the percentage in fluctuating investments (stocks, funds, etc.), excluding your home.")
+                    attempts += 1
+
+            except KeyboardInterrupt:
+                print("\n\nOkay, cancelling this session.")
+                return None
+            except EOFError:
+                print("\n\nInput ended unexpectedly.")
+                return None
+            except RuntimeError as e:
+                 logger.error(f"LLM Runtime error during interaction: {e}")
+                 print(f"\n[Error] A problem occurred with the AI service: {e}")
+                 print("Please check your setup and try again later.")
+                 return None
+            except Exception as e:
+                 logger.exception(f"An unexpected error occurred in the interaction loop: {e}")
+                 print(f"\nAn unexpected issue occurred ({type(e).__name__}). Please try again.")
+                 attempts += 1
+
+        if final_score is None and attempts >= self.config.max_attempts:
+             print(f"\nSorry, I couldn't determine a valid percentage after {self.config.max_attempts} tries.")
+             print("We'll have to skip this question.")
+
+        return final_score
+
+# %% [Main Execution]
+if __name__ == "__main__":
+    bot_instance = None
+    final_result = None
+    try:
+        # Use the new Config and Bot classes
+        app_config = AssetAllocationConfig()
+        bot_instance = AssetAllocationBot(config=app_config)
+        final_result = bot_instance.run_interaction()
+
+        if final_result is not None:
+            # Updated final message
+            print(f"\n--- Interaction Complete. Final Asset Allocation Score: {final_result} ---")
+        else:
+            print("\n--- Interaction ended without determining a final score. ---")
+
+    except Exception as main_error:
+         logger.exception(f"A critical error occurred in the main execution block: {main_error}")
+         print(f"\nA critical error occurred: {main_error}")
+
+    finally:
+        # Updated exit message
+        print("\nExiting Asset Allocation Bot.")

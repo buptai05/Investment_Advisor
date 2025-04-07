@@ -1,0 +1,477 @@
+# %% [Test Harness - Duration Bot - IMPROVED]
+# This cell should be run AFTER the cell containing your DurationChatbot class definition
+# and the standalone utility functions (like validate_parsed_duration, calculate_duration_score).
+
+import time
+import traceback
+import csv
+import datetime
+import logging # Ensure logging is imported
+from typing import Optional, List, Dict, Any
+
+# --- Assume necessary components are defined in the environment ---
+# If running standalone, you might need to uncomment and adapt imports/definitions:
+# from your_module import DurationChatbot, DurationConfig, validate_parsed_duration, calculate_duration_score, setup_logging
+# Or define them here if they aren't available from a previous cell execution.
+
+# --- Robust Logger Setup ---
+# Use existing logger if available, otherwise set it up.
+try:
+    # Check if a logger instance named 'logger' already exists and is configured
+    if isinstance(logger, logging.Logger) and logger.hasHandlers():
+        logger.info("Using existing logger instance for Test Harness.")
+    else:
+        # If logger exists but isn't configured, reconfigure it (or setup if it doesn't exist)
+        raise NameError # Trigger setup
+except NameError:
+    print("Setting up logger for Test Harness.")
+    # --- Standard Logging Setup Function ---
+    def setup_logging(level=logging.INFO, name="DurationTestHarness") -> logging.Logger:
+        """Configure logging for the application"""
+        # Remove existing handlers for the root logger to avoid duplicate messages
+        # if this function is called multiple times in the same session.
+        # for handler in logging.root.handlers[:]:
+        #    logging.root.removeHandler(handler)
+
+        logging.basicConfig(
+            level=level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            force=True # Use force=True in basicConfig for forceful reconfiguration
+        )
+        # Set library loggers to ERROR to further reduce noise
+        logging.getLogger("httpx").setLevel(logging.ERROR)
+        logging.getLogger("httpcore").setLevel(logging.ERROR)
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        return logging.getLogger(name)
+    logger = setup_logging(logging.INFO)
+
+# --- Ensure dependent utility functions are available ---
+# Define stubs if they are not imported, to allow the harness to run structurally
+# Replace these with actual imports or definitions from your bot's code.
+try:
+    validate_parsed_duration
+except NameError:
+    logger.warning("`validate_parsed_duration` not found, defining a placeholder. Replace with actual function.")
+    def validate_parsed_duration(years: float, months: float, config: Any) -> bool:
+        # Placeholder logic - replace with your actual validation
+        return 0 <= months < 12 and years >= 0
+
+try:
+    calculate_duration_score
+except NameError:
+    logger.warning("`calculate_duration_score` not found, defining a placeholder. Replace with actual function.")
+    def calculate_duration_score(duration_in_years: float, brackets: List[Tuple[float, float, int]], zero_score: int) -> Optional[int]:
+        # Placeholder logic - replace with your actual scoring
+        if duration_in_years == 0: return zero_score
+        for lower, upper, score in brackets:
+            if lower <= duration_in_years < upper: return score
+        return None # Should have a catch-all bracket usually
+
+try:
+    DurationChatbot
+except NameError:
+    logger.critical("`DurationChatbot` class not found. Test Harness cannot run.")
+    # Optionally raise an error or define a dummy class to prevent further execution errors
+    raise ImportError("DurationChatbot class definition is required to run the test harness.")
+try:
+    DurationConfig
+except NameError:
+    logger.critical("`DurationConfig` class not found. Test Harness cannot run.")
+    raise ImportError("DurationConfig class definition is required to run the test harness.")
+
+
+# --- Main Test Runner Function ---
+def run_duration_test_cases(
+    categories_to_run: Optional[List[str]] = None,
+    ids_to_run: Optional[List[str]] = None,
+    override_llm_params: Optional[Dict[str, Any]] = None # Allow overriding LLM params for testing
+    ):
+    """
+    Runs a predefined set of test cases against the DurationChatbot.
+
+    Args:
+        categories_to_run: Optional list of category strings to filter tests.
+        ids_to_run: Optional list of test ID strings to filter tests.
+        override_llm_params: Optional dictionary to override default LLM params for testing.
+    """
+    print("--- Starting Duration Bot Test Cases ---")
+    logger.info("--- Starting Duration Bot Test Cases ---")
+    if categories_to_run:
+        print(f"Filtering by Categories: {categories_to_run}")
+        logger.info(f"Filtering by Categories: {categories_to_run}")
+    if ids_to_run:
+        print(f"Filtering by IDs: {ids_to_run}")
+        logger.info(f"Filtering by IDs: {ids_to_run}")
+
+    bot_instance = None
+    all_results_data = []
+
+    # --- Initialize Config and Bot ---
+    try:
+        duration_config = DurationConfig() # Use the default config
+        if override_llm_params:
+           duration_config.llm_params.update(override_llm_params)
+           print(f"Test Config Override: LLM params updated: {override_llm_params}")
+           logger.info(f"Test Config Override: LLM params updated: {override_llm_params}")
+
+        bot_instance = DurationChatbot(config=duration_config)
+        print("Initializing LLM chain (this may take a moment)...")
+        logger.info("Attempting to initialize LLM chain...")
+        # Ensure LLM Chain is initialized before running tests
+        bot_instance._initialize_llm_chain() # This might raise exceptions if setup fails
+        print("DurationChatbot initialized successfully.")
+        logger.info("DurationChatbot initialized successfully.")
+
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: Failed to initialize DurationChatbot: {e}")
+        print(traceback.format_exc()) # Print full traceback for init errors
+        logger.exception("CRITICAL: DurationChatbot initialization failed during test setup.")
+        print("\nCannot proceed with tests.")
+        return # Stop execution if bot can't be initialized
+
+    # --- Define Test Cases (same as before) ---
+    test_cases = [
+        # === Category 1: Basic Input Validation ===
+        {'id': 'TC_DUR_001', 'category': 'Input Validation', 'description': 'Empty String Input','prompt': '', 'expected': 'fail'},
+        {'id': 'TC_DUR_002', 'category': 'Input Validation', 'description': 'Whitespace Input','prompt': '   \t \n', 'expected': 'fail'},
+        {'id': 'TC_DUR_003', 'category': 'Input Validation', 'description': 'Gibberish Input','prompt': 'asdfkljhqwerpoiuyt', 'expected': 'fail'},
+        {'id': 'TC_DUR_004', 'category': 'Input Validation', 'description': 'Irrelevant Statement (No Numbers)','prompt': 'I have a savings account.', 'expected': 'fail'},
+        {'id': 'TC_DUR_005', 'category': 'Input Validation', 'description': 'Explicit "I dont know"','prompt': "I don't know how many months.", 'expected': 'fail'},
+        {'id': 'TC_DUR_006', 'category': 'Input Validation', 'description': 'Vague Amount ("a few")','prompt': 'Just a few months.', 'expected': 'fail'},
+        {'id': 'TC_DUR_007', 'category': 'Input Validation', 'description': 'Vague Amount ("some")','prompt': 'I have some savings set aside.', 'expected': 'fail'},
+        {'id': 'TC_DUR_008', 'category': 'Input Validation', 'description': 'Non-duration Number (Amount)','prompt': 'I saved 5000 dollars.', 'expected': 'fail'},
+        # === Category 2: Core Extraction (Months Only) ===
+        {'id': 'TC_DUR_009', 'category': 'Core Extraction - Months', 'description': 'Simple Integer Months','prompt': '3', 'expected': 'score'},
+        {'id': 'TC_DUR_010', 'category': 'Core Extraction - Months', 'description': 'Integer Months with Unit','prompt': '6 months', 'expected': 'score'},
+        {'id': 'TC_DUR_011', 'category': 'Core Extraction - Months', 'description': 'Integer Months with "mths"','prompt': '4 mths', 'expected': 'score'},
+        {'id': 'TC_DUR_012', 'category': 'Core Extraction - Months', 'description': 'Months in Sentence','prompt': 'I think I have about 8 months of expenses covered.', 'expected': 'score'},
+        {'id': 'TC_DUR_013', 'category': 'Core Extraction - Months', 'description': 'Large Integer Months (>12)','prompt': '18 months', 'expected': 'score'},
+        {'id': 'TC_DUR_014', 'category': 'Core Extraction - Months', 'description': 'Very Large Integer Months','prompt': '30 months', 'expected': 'score'},
+        {'id': 'TC_DUR_015', 'category': 'Core Extraction - Months', 'description': 'Zero Months (Number)','prompt': '0 months', 'expected': 'score'},
+        {'id': 'TC_DUR_016', 'category': 'Core Extraction - Months', 'description': 'Zero Months (Word)','prompt': 'Zero months saved', 'expected': 'score'},
+        {'id': 'TC_DUR_017', 'category': 'Core Extraction - Months', 'description': 'No Units Assumed Months','prompt': 'I have 5 saved up.', 'expected': 'score'},
+        {'id': 'TC_DUR_018', 'category': 'Core Extraction - Months', 'description': 'Fractional Months (LLM should round/handle)','prompt': 'About 2.5 months', 'expected': 'score'},
+        # === Category 3: Core Extraction (Years Only) ===
+        {'id': 'TC_DUR_019', 'category': 'Core Extraction - Years', 'description': 'Simple Integer Year','prompt': '1 year', 'expected': 'score'},
+        {'id': 'TC_DUR_020', 'category': 'Core Extraction - Years', 'description': 'Integer Years with "yrs"','prompt': '2 yrs', 'expected': 'score'},
+        {'id': 'TC_DUR_021', 'category': 'Core Extraction - Years', 'description': 'Float Year (0.x)','prompt': '0.5 years', 'expected': 'score'},
+        {'id': 'TC_DUR_022', 'category': 'Core Extraction - Years', 'description': 'Float Year (>1)','prompt': '1.5 years', 'expected': 'score'},
+        {'id': 'TC_DUR_023', 'category': 'Core Extraction - Years', 'description': 'Float Year (Quarter)','prompt': '0.75 yr', 'expected': 'score'},
+        {'id': 'TC_DUR_024', 'category': 'Core Extraction - Years', 'description': 'Years in Sentence','prompt': 'My savings cover about 1.25 years.', 'expected': 'score'},
+        {'id': 'TC_DUR_025', 'category': 'Core Extraction - Years', 'description': 'Zero Years','prompt': '0 years', 'expected': 'score'},
+        # === Category 4: Core Extraction (Years & Months Combined) ===
+        {'id': 'TC_DUR_026', 'category': 'Core Extraction - Combined', 'description': 'Years and Months','prompt': '1 year and 3 months', 'expected': 'score'},
+        {'id': 'TC_DUR_027', 'category': 'Core Extraction - Combined', 'description': 'Years (plural) and Months (singular)','prompt': '2 years and 1 month', 'expected': 'score'},
+        {'id': 'TC_DUR_028', 'category': 'Core Extraction - Combined', 'description': 'Years and Months (abbr)','prompt': '1 yr 6 mths', 'expected': 'score'},
+        {'id': 'TC_DUR_029', 'category': 'Core Extraction - Combined', 'description': 'Sentence with Years and Months','prompt': 'I have managed to save for 1 year and 9 months', 'expected': 'score'},
+        # === Category 5: Validation Logic & Boundaries ===
+        {'id': 'TC_DUR_030', 'category': 'Validation - Boundary', 'description': 'Negative Months','prompt': '-3 months', 'expected': 'fail'},
+        {'id': 'TC_DUR_031', 'category': 'Validation - Boundary', 'description': 'Negative Years','prompt': '-1 year', 'expected': 'fail'},
+        {'id': 'TC_DUR_032', 'category': 'Validation - Boundary', 'description': 'Invalid Months Value (>11)','prompt': '1 year and 15 months', 'llm_direct_output_override': '(1, 15)', 'expected': 'fail'},
+        {'id': 'TC_DUR_033', 'category': 'Validation - Boundary', 'description': 'Exactly Zero (Word "None")','prompt': 'None', 'expected': 'score'},
+        {'id': 'TC_DUR_034', 'category': 'Validation - Boundary', 'description': 'Exactly Zero (Word "Nothing")','prompt': 'I have saved nothing yet', 'expected': 'score'},
+        # === Category 6: Score Bracket Boundaries ===
+        {'id': 'TC_DUR_035', 'category': 'Score Boundary', 'description': 'Exactly 0 Months (Score 10)','prompt': '0', 'expected': 'score'},
+        {'id': 'TC_DUR_036', 'category': 'Score Boundary', 'description': 'Just Above 0 (1 month) (Score 20)','prompt': '1 month', 'expected': 'score'},
+        {'id': 'TC_DUR_037', 'category': 'Score Boundary', 'description': 'Highest value in (0, 0.25) bracket (2 months) (Score 20)','prompt': '2 months', 'expected': 'score'},
+        {'id': 'TC_DUR_038', 'category': 'Score Boundary', 'description': 'Exactly 3 months (Score 30)','prompt': '3 months', 'expected': 'score'},
+        {'id': 'TC_DUR_039', 'category': 'Score Boundary', 'description': 'Just Above 3 months (4 months) (Score 30)','prompt': '4 months', 'expected': 'score'},
+        {'id': 'TC_DUR_040', 'category': 'Score Boundary', 'description': 'Highest value in [0.25, 0.5) bracket (5 months) (Score 30)','prompt': '5 months', 'expected': 'score'},
+        {'id': 'TC_DUR_041', 'category': 'Score Boundary', 'description': 'Exactly 6 months (Score 40)','prompt': '6 months', 'expected': 'score'},
+        {'id': 'TC_DUR_042', 'category': 'Score Boundary', 'description': 'Just Above 6 months (7 months) (Score 40)','prompt': '7 months', 'expected': 'score'},
+        {'id': 'TC_DUR_043', 'category': 'Score Boundary', 'description': 'Highest value in [0.5, 0.75) bracket (8 months) (Score 40)','prompt': '8 months', 'expected': 'score'},
+        {'id': 'TC_DUR_044', 'category': 'Score Boundary', 'description': 'Exactly 9 months (Score 50)','prompt': '9 months', 'expected': 'score'},
+        {'id': 'TC_DUR_045', 'category': 'Score Boundary', 'description': 'Just Above 9 months (10 months) (Score 50)','prompt': '10 months', 'expected': 'score'},
+        {'id': 'TC_DUR_046', 'category': 'Score Boundary', 'description': 'Large Duration (5 years) (Score 50)','prompt': '5 years', 'expected': 'score'},
+        # === Category 7: LLM Robustness & Prompt Adherence ===
+        {'id': 'TC_DUR_047', 'category': 'LLM Robustness', 'description': 'Input with Multiple Numbers (Select Duration)','prompt': 'I have 2 kids and about 4 months of expenses saved.', 'expected': 'score'},
+        {'id': 'TC_DUR_048', 'category': 'LLM Robustness', 'description': 'Input with Range (Ambiguous)','prompt': 'Somewhere between 3 and 6 months.', 'expected': 'score'}, # Expects LLM picks one
+        {'id': 'TC_DUR_049', 'category': 'LLM Robustness', 'description': 'Input Trying to Break Format (Request Text)','prompt': "It's 1 year. Can you confirm that?", 'expected': 'score'},
+        {'id': 'TC_DUR_050', 'category': 'LLM Robustness', 'description': 'Input Containing "(0, 0)" literally','prompt': 'My savings target is not (0, 0), it is 12 months', 'expected': 'score'},
+        {'id': 'TC_DUR_051', 'category': 'LLM Robustness', 'description': 'LLM Incorrect Format (Simulated Fail)','prompt': '6 months','llm_direct_output_override': 'I found 6 months', 'expected': 'fail'},
+        {'id': 'TC_DUR_052', 'category': 'LLM Robustness', 'description': 'LLM Correct Format but Invalid Data (Simulated Fail)','prompt': 'invalid stuff','llm_direct_output_override': '(-1, 5)', 'expected': 'fail'}, # Parser handles negative, validation should fail
+        {'id': 'TC_DUR_053', 'category': 'LLM Robustness', 'description': 'Input with Typo','prompt': 'About 8 monhs', 'expected': 'score'},
+        {'id': 'TC_DUR_054', 'category': 'LLM Robustness', 'description': 'Input with Emoji','prompt': 'I saved up 1 year! 🎉', 'expected': 'score'},
+        {'id': 'TC_DUR_055', 'category': 'LLM Robustness', 'description': 'Input phrasing as question','prompt': 'Is 9 months enough?', 'expected': 'score'},
+        {'id': 'TC_DUR_056', 'category': 'LLM Robustness', 'description': 'Input with "per month"','prompt': 'I save 500 per month', 'expected': 'fail'},
+        # === Category 8: Edge Cases ===
+        {'id': 'TC_DUR_057', 'category': 'Edge Case - Language', 'description': 'Non-English Duration','prompt': 'He ahorrado seis meses.', 'expected': 'fail'},
+        {'id': 'TC_DUR_058', 'category': 'Edge Case - Format', 'description': 'Number with Comma (Ambiguous)','prompt': '1,5 years', 'expected': 'score'},
+        {'id': 'TC_DUR_059', 'category': 'Edge Case - Performance', 'description': 'Very Long Input','prompt': 'Thinking about my finances... ' * 50 + ' I estimate I have 4 months saved. ' + ' Need to save more... ' * 50, 'expected': 'score'},
+        {'id': 'TC_DUR_060', 'category': 'Edge Case - Format', 'description': 'LLM outputs tuple with extra whitespace','prompt': '1 yr 2 months', 'llm_direct_output_override': '  (  1 , 2   )  \n', 'expected': 'score'},
+        {'id': 'TC_DUR_061', 'category': 'Edge Case - Format', 'description': 'LLM outputs float months (parser handles)','prompt': 'approx 2 and a half months', 'llm_direct_output_override': '(0, 2.5)', 'expected': 'score'},
+        {'id': 'TC_DUR_062', 'category': 'Edge Case - Calculation', 'description': 'Large number of months resulting in large years','prompt': '120 months', 'expected': 'score'},
+        {'id': 'TC_DUR_063', 'category': 'Edge Case - Calculation', 'description': 'Fractional year resulting in near-integer months','prompt': '0.99 years', 'llm_direct_output_override': '(0.99, 0)', 'expected': 'score'},
+    ]
+    # --- End Test Case Definition ---
+
+    total_tests = len(test_cases)
+    print(f"Total number of test cases defined: {total_tests}")
+    logger.info(f"Total number of test cases defined: {total_tests}")
+
+    # --- Run Tests ---
+    results = {'passed': 0, 'failed': 0, 'maybe': 0, 'skipped': 0, 'total_run': 0}
+    start_run_time = time.monotonic()
+
+    for i, test in enumerate(test_cases):
+        test_id = test.get('id', f'TC_DUR_{i+1:03d}')
+
+        # --- Filtering Logic ---
+        run_this_test = True
+        if categories_to_run and test.get('category') not in categories_to_run:
+            run_this_test = False
+        if ids_to_run and test_id not in ids_to_run:
+            run_this_test = False
+
+        if not run_this_test:
+            results['skipped'] += 1
+            logger.debug(f"Skipping test case {test_id} due to filters.")
+            continue
+        # --- End Filtering ---
+
+        results['total_run'] += 1
+        print(f"\n--- Test Case {results['total_run']}/{total_tests-results['skipped']} [{test_id} / {test.get('category','N/A')}] ---")
+        logger.info(f"--- Running Test Case {test_id} ({test.get('description','N/A')}) ---")
+        print(f"Description: {test.get('description','N/A')}")
+        display_prompt = test['prompt']
+        # Truncate long prompts for display only
+        display_prompt_short = (display_prompt[:97] + '...') if len(display_prompt) > 100 else display_prompt
+        print(f"Input: \"{display_prompt_short}\"")
+        logger.info(f"Input: \"{display_prompt}\"") # Log full prompt
+        print(f"Expected Outcome Type: {test['expected']}")
+        logger.info(f"Expected Outcome Type: {test['expected']}")
+
+
+        # Reset variables for each test
+        actual_score = None
+        duration_result = None
+        parsed_years = None
+        parsed_months = None
+        total_duration_years = None
+        duration = -1.0
+        processing_details = "Test Start"
+        outcome_type = 'fail' # Default to fail
+        llm_raw_output = "N/A (Not Overridden)"
+        result_status = "FAIL"
+        log_prefix = "🔴"
+
+        # --- Execute the core logic with Timing & Error Handling ---
+        try:
+            start_time = time.monotonic()
+
+            # --- Check for LLM Output Override ---
+            if 'llm_direct_output_override' in test:
+                llm_raw_output = test['llm_direct_output_override']
+                logger.info(f"[{test_id}] Using overridden LLM output: '{llm_raw_output}'")
+                processing_details = f"Using LLM Override: '{llm_raw_output}'"
+                try:
+                    # Directly call parsing
+                    parsed_years, parsed_months = bot_instance.parse_llm_duration_response(llm_raw_output)
+                    processing_details += f" | Parsed: Y={parsed_years:.2f}, M={parsed_months:.2f}"
+                    logger.debug(f"[{test_id}] Override parsed: Y={parsed_years:.2f}, M={parsed_months:.2f}")
+
+                    # *** FIXED: Call validate_parsed_duration correctly (as standalone) ***
+                    if validate_parsed_duration(parsed_years, parsed_months, bot_instance.config):
+                        total_duration_years = parsed_years + parsed_months / 12.0
+                        duration_result = (parsed_years, parsed_months, total_duration_years) # Store tuple
+                        processing_details += f" | Validated | Total: {total_duration_years:.2f} years"
+                        logger.debug(f"[{test_id}] Override validated. Total Duration: {total_duration_years:.2f} years")
+                    else:
+                        # Validation failed (function itself should log reason)
+                        processing_details += " | Failed Validation"
+                        logger.warning(f"[{test_id}] Override failed validation for Y={parsed_years}, M={parsed_months}")
+                        duration_result = None # Mark as None due to validation fail
+
+                except ValueError as parse_error:
+                    # Parsing failed (parser function should log details)
+                    processing_details += f" | Failed Parsing: {parse_error}"
+                    logger.warning(f"[{test_id}] Override failed parsing: {parse_error}")
+                    duration_result = None # Parsing failed
+
+            else:
+                # --- Normal Execution: Call process_user_input ---
+                processing_details = "Calling process_user_input..."
+                duration_result = bot_instance.process_user_input(test['prompt'])
+                # If successful, duration_result = (years, months, total_duration_years)
+                # If failed (parse, validate, LLM error), duration_result = None (function logs details)
+
+            duration = time.monotonic() - start_time
+            # --- End LLM/Processing Logic ---
+
+
+            # --- Process Result ---
+            if duration_result is not None:
+                # Unpack the tuple
+                parsed_years, parsed_months, total_duration_years = duration_result
+                # Update details if not already set by override logic
+                if 'Calling process_user_input' in processing_details:
+                     processing_details = f"Processed: Y={parsed_years:.2f}, M={parsed_months:.2f}, Total={total_duration_years:.2f} years"
+
+                # Calculate score using the bot's config
+                score = calculate_duration_score(
+                    total_duration_years,
+                    bot_instance.config.duration_brackets,
+                    bot_instance.config.zero_duration_score
+                 )
+                if score is not None:
+                    actual_score = score
+                    outcome_type = 'score'
+                    processing_details += f" -> Score: {score}"
+                    logger.info(f"[{test_id}] Result: Score={score} (Total Duration: {total_duration_years:.2f})")
+                else:
+                    # This should be rare if brackets are comprehensive
+                    processing_details += " | Scoring Failed (returned None)"
+                    logger.error(f"[{test_id}] Scoring failed for valid duration {total_duration_years:.2f}")
+                    outcome_type = 'fail' # Treat scoring failure as test failure
+            else:
+                 # process_user_input returned None, or override failed parse/validation
+                 if 'Calling process_user_input' in processing_details:
+                     # Make detail more specific if process_user_input returned None
+                     processing_details = "process_user_input returned None (Check bot logs for parse/validation/LLM error)"
+                 # Keep details from override failure if applicable
+                 outcome_type = 'fail'
+                 logger.info(f"[{test_id}] Result: Failed to get valid duration score.")
+
+        except Exception as e:
+            # Catch unexpected errors during the test execution itself
+            duration = time.monotonic() - start_time if 'start_time' in locals() else -1.0
+            logger.error(f"CRITICAL EXCEPTION during test case {test_id} ('{test.get('description','N/A')}'): {e}", exc_info=True)
+            print(f"  ERROR: Exception occurred during test execution: {e}")
+            print(f"    Traceback: {traceback.format_exc().splitlines()[-1]}") # Last line of traceback
+            outcome_type = 'fail'
+            processing_details = f"Test Execution Exception: {type(e).__name__}: {str(e)[:150]}..."
+        # --- End Core Logic & Error Handling ---
+
+        # --- Evaluate Result ---
+        if test['expected'] == outcome_type:
+            result_status = "PASS"
+            log_prefix = "✅"
+            results['passed'] += 1
+        elif test['expected'] == 'maybe_score' and outcome_type == 'score':
+             result_status = f"PASS (Maybe - Matched Score)"
+             log_prefix = "✅"
+             results['passed'] += 1 # Count maybe_score that results in score as PASS
+        elif test['expected'] == 'maybe_score' and outcome_type == 'fail':
+            result_status = f"INFO (Maybe - Matched Fail)"
+            log_prefix = "🤔"
+            results['maybe'] += 1
+        else: # Actual mismatch
+            result_status = "FAIL"
+            results['failed'] += 1
+            log_prefix = "🔴" # Ensure fail prefix
+
+        print(f"  {log_prefix} Result: {result_status}")
+        print(f"      Actual Outcome Type: {outcome_type}")
+        print(f"      Duration: {duration:.4f} sec")
+        print(f"      Processing Details: {processing_details}")
+        logger.info(f"[{test_id}] Result Status: {result_status} | Actual Outcome: {outcome_type} | Duration: {duration:.4f}s")
+        if actual_score is not None:
+             print(f"      Actual Score: {actual_score}")
+             logger.info(f"[{test_id}] Actual Score: {actual_score}")
+
+        # --- Store result for CSV ---
+        result_row = {
+            "RunTimestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "TestID": test_id,
+            "Category": test.get('category', 'N/A'),
+            "Description": test.get('description', 'N/A'),
+            "InputPrompt": test['prompt'], # Store full prompt
+            "ExpectedOutcome": test['expected'],
+            "ActualOutcome": outcome_type,
+            "ResultStatus": result_status.split(" ")[0], # Just PASS/FAIL/INFO
+            "DurationSec": f"{duration:.4f}",
+            "ActualYears": f"{parsed_years:.2f}" if parsed_years is not None else "",
+            "ActualMonths": f"{parsed_months:.2f}" if parsed_months is not None else "",
+            "ActualTotalDurationYears": f"{total_duration_years:.2f}" if total_duration_years is not None else "",
+            "ActualScore": str(actual_score) if actual_score is not None else "",
+            "LLMRawOutputOverride": llm_raw_output if 'llm_direct_output_override' in test else "", # Log overridden output
+            "Notes": processing_details # Store the final processing details
+        }
+        all_results_data.append(result_row)
+
+        # Optional delay removed - add back if rate limiting is an issue
+        # time.sleep(0.1)
+
+    # --- Print Summary ---
+    end_run_time = time.monotonic()
+    total_run_duration = end_run_time - start_run_time
+    print("\n" + "="*30)
+    print("--- Test Summary ---")
+    print(f"Total Tests Defined: {total_tests}")
+    print(f"Total Tests Skipped: {results['skipped']}")
+    print(f"Total Tests Run: {results['total_run']} in {total_run_duration:.2f} seconds")
+    avg_time = (total_run_duration / results['total_run']) if results['total_run'] > 0 else 0
+    print(f"Average Time per Test: {avg_time:.2f} seconds")
+    print(f"✅ Passed: {results['passed']}")
+    print(f"🔴 Failed: {results['failed']}")
+    print(f"🤔 Maybe (Info): {results['maybe']}")
+    print("="*30)
+    logger.info("--- Test Summary ---")
+    logger.info(f"Total Run: {results['total_run']}, Passed: {results['passed']}, Failed: {results['failed']}, Maybe: {results['maybe']}, Skipped: {results['skipped']}")
+    logger.info(f"Total Duration: {total_run_duration:.2f}s, Average Time: {avg_time:.2f}s")
+
+
+    # --- Write results to CSV ---
+    print("\n--- Writing Test Results to CSV ---")
+    timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    results_filename = f"duration_test_run_{timestamp_str}.csv"
+    results_filename_latest = "duration_test_run_latest.csv" # Overwrite latest
+
+    if not all_results_data:
+        print("No results data to write.")
+        logger.warning("No results data generated to write to CSV.")
+    else:
+        # Dynamically determine fieldnames but prefer a specific order
+        fieldnames_set = set()
+        for row in all_results_data:
+            fieldnames_set.update(row.keys())
+        preferred_order = [
+            "RunTimestamp", "TestID", "Category", "Description", "InputPrompt",
+            "ExpectedOutcome", "ActualOutcome", "ResultStatus", "DurationSec",
+            "ActualYears", "ActualMonths", "ActualTotalDurationYears", "ActualScore",
+            "LLMRawOutputOverride", "Notes"
+        ]
+        # Ensure all keys are included, with preferred ones first
+        fieldnames = [f for f in preferred_order if f in fieldnames_set] + \
+                     sorted([f for f in fieldnames_set if f not in preferred_order])
+
+        # Function to write CSV safely
+        def write_csv(filename, data, field_names):
+            try:
+                with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=field_names, extrasaction='ignore')
+                    writer.writeheader()
+                    writer.writerows(data)
+                print(f"Results successfully written to {filename}")
+                logger.info(f"Test results successfully written to {filename}")
+            except IOError as e:
+                print(f"Error writing results to CSV ({filename}): {e}")
+                logger.error(f"Failed to write results CSV ({filename}): {e}")
+            except Exception as e:
+                 print(f"An unexpected error occurred writing CSV ({filename}): {e}")
+                 logger.exception(f"Unexpected error writing results CSV ({filename})")
+
+        # Write timestamped file
+        write_csv(results_filename, all_results_data, fieldnames)
+        # Write/overwrite latest file
+        write_csv(results_filename_latest, all_results_data, fieldnames)
+
+    print("--- Testing Complete ---")
+    logger.info("--- Duration Bot Testing Complete ---")
+
+
+# %% [Run Tests - Duration Bot]
+# This cell executes the test runner function defined above.
+if __name__ == "__main__":
+   print("\nStarting Duration Bot Test Harness Execution...")
+   # --- Example Usage of Filtering (Uncomment to use) ---
+   # run_duration_test_cases(categories_to_run=['Score Boundary'])
+   # run_duration_test_cases(ids_to_run=['TC_DUR_013', 'TC_DUR_048', 'TC_DUR_051'])
+   # run_duration_test_cases(override_llm_params={"temperature": 0.5}) # Example override
+
+   # Run all tests (default):
+   run_duration_test_cases()
+
+   print("\nExiting duration test script.")
